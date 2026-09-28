@@ -11,9 +11,9 @@ import (
 func TestRememberStoresFact(t *testing.T) {
 	t.Parallel()
 	var gotContent, gotType string
-	tool := Remember(func(_ context.Context, content, typ string) (string, error) {
+	tool := Remember(func(_ context.Context, content, typ string) (string, string, error) {
 		gotContent, gotType = content, typ
-		return "mem-1", nil
+		return "mem-1", "active", nil
 	})
 	out, err := tool.Execute(context.Background(),
 		json.RawMessage(`{"content":"User's birthday is 3 March.","type":"semantic"}`))
@@ -31,9 +31,9 @@ func TestRememberStoresFact(t *testing.T) {
 func TestRememberDefaultsToSemantic(t *testing.T) {
 	t.Parallel()
 	var gotType string
-	tool := Remember(func(_ context.Context, _, typ string) (string, error) {
+	tool := Remember(func(_ context.Context, _, typ string) (string, string, error) {
 		gotType = typ
-		return "id", nil
+		return "id", "active", nil
 	})
 	if _, err := tool.Execute(context.Background(), json.RawMessage(`{"content":"a fact"}`)); err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -45,9 +45,9 @@ func TestRememberDefaultsToSemantic(t *testing.T) {
 
 func TestRememberValidates(t *testing.T) {
 	t.Parallel()
-	tool := Remember(func(context.Context, string, string) (string, error) {
+	tool := Remember(func(context.Context, string, string) (string, string, error) {
 		t.Fatal("save must not run on invalid args")
-		return "", nil
+		return "", "", nil
 	})
 	if _, err := tool.Execute(context.Background(), json.RawMessage(`{"content":"  "}`)); err == nil {
 		t.Fatal("empty content accepted")
@@ -56,8 +56,8 @@ func TestRememberValidates(t *testing.T) {
 
 func TestRememberSurfacesSaveError(t *testing.T) {
 	t.Parallel()
-	tool := Remember(func(context.Context, string, string) (string, error) {
-		return "", errors.New("memoryd down")
+	tool := Remember(func(context.Context, string, string) (string, string, error) {
+		return "", "", errors.New("memoryd down")
 	})
 	if _, err := tool.Execute(context.Background(), json.RawMessage(`{"content":"x"}`)); err == nil ||
 		!strings.Contains(err.Error(), "memoryd down") {

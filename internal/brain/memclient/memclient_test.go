@@ -1,6 +1,7 @@
 package memclient
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,58 @@ import (
 
 	"github.com/SumonMSelim/timothy/internal/memory/retrieval"
 )
+
+func TestAddCarriesReviewGateAndStatus(t *testing.T) {
+	t.Parallel()
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/memories" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_ = json.NewEncoder(w).Encode(map[string]string{"id": "m1", "status": "pending"})
+	}))
+	defer srv.Close()
+
+	id, status, err := New(srv.URL).Add(context.Background(), "page fact", "semantic", true)
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if id != "m1" || status != "pending" {
+		t.Fatalf("Add = (%q, %q), want (m1, pending)", id, status)
+	}
+	if got["require_review"] != true {
+		t.Fatalf("request require_review = %v, want true", got["require_review"])
+	}
+}
+
+func TestAddAcceptsDroppedRejectedDuplicate(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"id": "", "status": "dropped"})
+	}))
+	defer srv.Close()
+
+	id, status, err := New(srv.URL).Add(context.Background(), "fact", "semantic", false)
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if id != "" || status != "dropped" {
+		t.Fatalf("Add = (%q, %q), want empty id and dropped", id, status)
+	}
+}
+
+func TestAddRejectsMissingStatus(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"id": "m1"})
+	}))
+	defer srv.Close()
+
+	if _, _, err := New(srv.URL).Add(context.Background(), "fact", "semantic", false); err == nil {
+		t.Fatal("Add accepted a response without status")
+	}
+}
 
 func TestExtractRoundTrip(t *testing.T) {
 	t.Parallel()
