@@ -32,22 +32,26 @@ COPY --from=node-dist /usr/local/lib/node_modules /usr/local/lib/node_modules
 # prefix (/usr/local) rather than the runtime NPM_CONFIG_PREFIX below —
 # that prefix is per-user (/home/sandbox) and not writable at this
 # build stage — so it lands on PATH for uid 65534 too.
-RUN NPM_CONFIG_PREFIX=/usr/local npm install -g @anthropic-ai/claude-code@2.1.223
+RUN NPM_CONFIG_PREFIX=/usr/local npm install -g @anthropic-ai/claude-code@2.1.274 \
+    && claude --version
 
 # Headless pi coding agent, same rationale as claude above. Pin matches
-# internal/brain/missions/executor/testdata/pi-0.84.1 - bump both
+# internal/brain/missions/executor/testdata/pi-0.87.1 - bump both
 # together. node 24 here already satisfies pi's engines >=22.19.
-RUN NPM_CONFIG_PREFIX=/usr/local npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.84.1
+RUN NPM_CONFIG_PREFIX=/usr/local npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.87.1 \
+    && pi --version
 
-# Headless OpenAI Codex CLI, same rationale as claude/pi above. Pin
-# matches internal/brain/missions/executor/testdata/codex-0.147.0 -
-# bump both together.
-RUN NPM_CONFIG_PREFIX=/usr/local npm install -g @openai/codex@0.147.0
+# Headless OpenAI Codex CLI, same rationale as claude/pi above.
+# Fixtures stay testdata/codex-0.147.0: re-recording 0.157.1 hung on
+# its own background sync to api.openai.com (issue #951).
+RUN NPM_CONFIG_PREFIX=/usr/local npm install -g @openai/codex@0.157.1 \
+    && codex --version
 
 # Headless opencode CLI, same rationale as claude/pi/codex above. Pin
-# matches internal/brain/missions/executor/testdata/opencode-1.18.18 -
+# matches internal/brain/missions/executor/testdata/opencode-1.18.32 -
 # bump both together.
-RUN NPM_CONFIG_PREFIX=/usr/local npm install -g opencode-ai@1.18.18
+RUN NPM_CONFIG_PREFIX=/usr/local npm install -g opencode-ai@1.18.32 \
+    && opencode --version
 
 # Headless Cursor CLI, same rationale as claude/pi/codex/opencode
 # above. No npm package exists; the official installer
@@ -59,11 +63,16 @@ RUN NPM_CONFIG_PREFIX=/usr/local npm install -g opencode-ai@1.18.18
 # the fixtures never captured), so this pins the current stable. To
 # bump: read the version off the installer script, refresh both
 # checksums, re-record fixtures if the wire format moved.
+#
+# D-120 (issue #947): cursor-agent self-updates on start and the
+# download exceeds the fsize ulimit (D-106), so tar dies with SIGXFSZ
+# and dumps core. The adapter passes the hidden --disable-auto-update
+# flag; never raise fsize instead.
 ARG TARGETARCH
-ARG CURSOR_VERSION=2026.09.15-d2fe57e
+ARG CURSOR_VERSION=2026.09.26-dd393fe
 # Per-arch tarball checksums (release builds are multi-arch).
-ARG CURSOR_SHA256_AMD64=4b7b026dd104e935b216cc52f905a560d741fc80a4a4d62ef655735b96a15c97
-ARG CURSOR_SHA256_ARM64=2d741c12c3ee7a505584579efb28a0ee31ff13fefc1f347e2d3b43688c04620d
+ARG CURSOR_SHA256_AMD64=8085fd120f5c71f4eae7fea26a043718e5644e3071e4fab3220a0e58c51f9593
+ARG CURSOR_SHA256_ARM64=ab1178d0d8c10b254e7e427d1d673533a389338424e75034be9ab9da02845bde
 RUN case "${TARGETARCH}" in \
       arm64) arch=arm64; sha="${CURSOR_SHA256_ARM64}" ;; \
       *) arch=x64; sha="${CURSOR_SHA256_AMD64}" ;; \

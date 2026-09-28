@@ -118,6 +118,9 @@ func (cursorAdapter) BuildInvocation(spec InvocationSpec) (Invocation, error) {
 		"--force",
 		"--output-format", "stream-json",
 		"--trust",
+		// D-120 (issue #947): hidden flag; stops the self-update whose
+		// download hits the sandbox fsize ulimit.
+		"--disable-auto-update",
 		"--model", spec.Model,
 	}
 	if spec.SystemAppend != "" {
