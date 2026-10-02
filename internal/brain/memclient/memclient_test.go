@@ -36,6 +36,27 @@ func TestAddCarriesReviewGateAndStatus(t *testing.T) {
 	}
 }
 
+func TestAddAcceptsActiveStatusAndFalseReviewGate(t *testing.T) {
+	t.Parallel()
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_ = json.NewEncoder(w).Encode(map[string]string{"id": "m2", "status": "active"})
+	}))
+	defer srv.Close()
+
+	id, status, err := New(srv.URL).Add(context.Background(), "fact", "semantic", false)
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if id != "m2" || status != "active" {
+		t.Fatalf("Add = (%q, %q), want (m2, active)", id, status)
+	}
+	if got["require_review"] != false {
+		t.Fatalf("request require_review = %v, want false", got["require_review"])
+	}
+}
+
 func TestAddAcceptsDroppedRejectedDuplicate(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -61,6 +82,64 @@ func TestAddRejectsMissingStatus(t *testing.T) {
 
 	if _, _, err := New(srv.URL).Add(context.Background(), "fact", "semantic", false); err == nil {
 		t.Fatal("Add accepted a response without status")
+	}
+}
+
+func TestAddRejectsInvalidResponses(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "active without id", body: `{"status":"active"}`},
+		{name: "pending without id", body: `{"status":"pending"}`},
+		{name: "dropped with id", body: `{"id":"m1","status":"dropped"}`},
+		{name: "unknown status", body: `{"id":"m1","status":"archived"}`},
+		{name: "malformed json", body: `{`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			if _, _, err := New(srv.URL).Add(context.Background(), "fact", "semantic", false); err == nil {
+				t.Fatal("Add accepted an invalid response")
+			}
+		})
+	}
+}
+
+func TestAddRejectsMemoryDErrors(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	if _, _, err := New(srv.URL).Add(context.Background(), "fact", "semantic", false); err == nil {
+		t.Fatal("Add accepted a non-200 response")
+	}
+}
+
+func TestAddReportsMemoryDUnreachable(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	client := New(srv.URL)
+	srv.Close()
+
+	if _, _, err := client.Add(context.Background(), "fact", "semantic", false); err == nil ||
+		!strings.Contains(err.Error(), "memoryd unreachable") {
+		t.Fatalf("Add error = %v, want memoryd unreachable", err)
+	}
+}
+
+func TestAddRejectsInvalidRequestURL(t *testing.T) {
+	t.Parallel()
+	if _, _, err := New("http://%zz").Add(context.Background(), "fact", "semantic", false); err == nil {
+		t.Fatal("Add accepted an invalid request URL")
 	}
 }
 
