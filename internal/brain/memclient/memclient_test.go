@@ -2,6 +2,7 @@ package memclient
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -116,22 +117,27 @@ func TestRetrieveRoundTrip(t *testing.T) {
 	}
 }
 
-func TestRetrieveOmitsUnboundedLimit(t *testing.T) {
+func TestRetrieveOmitsNonPositiveLimit(t *testing.T) {
 	t.Parallel()
-	var got map[string]any
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
-			t.Errorf("decode request: %v", err)
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"memories": []Memory{}})
-	}))
-	defer srv.Close()
+	for _, limit := range []int{0, -1} {
+		t.Run(fmt.Sprintf("limit_%d", limit), func(t *testing.T) {
+			t.Parallel()
+			var got map[string]any
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+					t.Errorf("decode request: %v", err)
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"memories": []Memory{}})
+			}))
+			defer srv.Close()
 
-	if _, err := New(srv.URL).Retrieve(t.Context(), "s1", "query", 0); err != nil {
-		t.Fatalf("Retrieve: %v", err)
-	}
-	if _, ok := got["limit"]; ok {
-		t.Fatalf("request contains limit = %v, want no limit", got["limit"])
+			if _, err := New(srv.URL).Retrieve(t.Context(), "s1", "query", limit); err != nil {
+				t.Fatalf("Retrieve: %v", err)
+			}
+			if _, ok := got["limit"]; ok {
+				t.Fatalf("request contains limit = %v, want no limit", got["limit"])
+			}
+		})
 	}
 }
 

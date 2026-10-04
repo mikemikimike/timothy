@@ -105,11 +105,11 @@ type Memory struct {
 	Score   float64 `json:"score"`
 }
 
-// Retrieve asks memoryd what it remembers about a query. A zero limit
-// leaves the result count uncapped; zero memories is a normal answer.
+// Retrieve asks memoryd what it remembers about a query. A non-positive
+// limit leaves the result count uncapped; zero memories is a normal answer.
 func (c *Client) Retrieve(ctx context.Context, sessionID, query string, limit int) ([]Memory, error) {
 	params := map[string]any{"query": query, "session_id": sessionID}
-	if limit != 0 {
+	if limit > 0 {
 		params["limit"] = limit
 	}
 	body, err := json.Marshal(params)
