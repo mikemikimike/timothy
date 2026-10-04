@@ -41,11 +41,11 @@ const memoryColumns = `id, type, content, entity_refs, ` +
 // unless policy requires review; everything else lands pending.
 // Embedding may be empty (backfilled by extraction).
 func (s *Store) Insert(ctx context.Context, m Memory) (string, error) {
+	status := initialStatus(m)
 	db, err := s.db.Get()
 	if err != nil {
 		return "", fmt.Errorf("insert memory: %w", err)
 	}
-	status := initialStatus(m)
 	var id string
 	err = db.QueryRow(ctx, `INSERT INTO memories
 		(type, content, embedding, entity_refs, source_session, source_seq, actor, status, confidence)
