@@ -85,10 +85,6 @@ func Shell(cfg ShellConfig) *tools.Tool {
 	maxSecondsText := fmt.Sprintf("%d", int(maxTimeout/time.Second))
 	return &tools.Tool{
 		Name: "shell",
-		// Trusted: command output is the workspace the model itself
-		// works in; fencing it would wrap every build log (D-109 keeps
-		// the line D-107 drew).
-		Trusted: true,
 		Description: `Runs a shell command in the workspace directory.
 
 Use for file inspection, text processing, and running programs inside

@@ -257,6 +257,9 @@ func TestAgentWrapsToolErrorForModel(t *testing.T) {
 			if !strings.Contains(te.Message, tc.wantInMessage) {
 				t.Fatalf("message = %q, want it to contain %q", te.Message, tc.wantInMessage)
 			}
+			if !strings.Contains(te.Message, `trust="data"`) {
+				t.Fatalf("untrusted error message was not fenced: %q", te.Message)
+			}
 			// D-020: an error result keeps full effort.
 			if gw.requests[1].Effort != "" {
 				t.Fatalf("effort after error = %q, want normal", gw.requests[1].Effort)
@@ -299,7 +302,7 @@ func TestAgentUnknownToolIsNotRetryable(t *testing.T) {
 	if te.Error != codeUnknownTool || te.Retryable {
 		t.Fatalf("structured error = %+v, want unknown_tool and retryable false", te)
 	}
-	if !strings.Contains(te.Message, "unknown tool") {
+	if !strings.Contains(te.Message, "unknown tool") || !strings.Contains(te.Message, `trust="data"`) {
 		t.Fatalf("message = %q, want the original guidance", te.Message)
 	}
 }
@@ -340,15 +343,7 @@ func TestAgentPassesThroughToolOwnStructuredError(t *testing.T) {
 	if got == nil {
 		t.Fatal("no tool result reached the model")
 	}
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(got.Content), &obj); err != nil {
-		t.Fatalf("content is not an object: %q", got.Content)
-	}
-	if _, nested := obj["message"]; !nested {
-		t.Fatalf("content lost its shape: %q", got.Content)
-	}
-	var code string
-	if err := json.Unmarshal(obj["error"], &code); err != nil || code != "quota_exhausted" {
-		t.Fatalf("content = %q, want the tool's own error code passed through", got.Content)
+	if !strings.Contains(got.Content, `trust="data"`) || !strings.Contains(got.Content, own) {
+		t.Fatalf("content = %q, want the tool error JSON enclosed in the untrusted fence", got.Content)
 	}
 }

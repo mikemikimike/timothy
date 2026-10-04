@@ -40,6 +40,9 @@ const (
 type Message struct {
 	Role       string      `json:"role"` // "user" | "assistant" | "tool"
 	Content    string      `json:"content"`
+	// Untrusted marks brain-internal context derived from external data.
+	// It is used by the tool loop and is never sent to provider APIs.
+	Untrusted bool `json:"-"`
 	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
 	ToolResult *ToolResult `json:"tool_result,omitempty"`
 	// Images are transient content parts filled in at request-build

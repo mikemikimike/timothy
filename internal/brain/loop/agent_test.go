@@ -729,9 +729,9 @@ func TestFenceUntrusted(t *testing.T) {
 		{name: "read_mail_attachment converted by markitdown", tool: "read_mail_attachment", content: "# Invoice\n\ntotal 5", fenced: true},
 		{name: "namespaced connector tool", tool: "mymcp_read_mail", content: "From: a@b.test\n\nbody", fenced: true},
 		{name: "remote MCP tool under any name", tool: "jira_get_issue", content: "issue body", fenced: true},
-		{name: "trusted shell result untouched", tool: "shell", trusted: true, content: "ok", fenced: false},
+		{name: "shell output is untrusted", tool: "shell", content: "ok", fenced: true},
 		{name: "trusted write_file untouched", tool: "write_file", trusted: true, content: "wrote 3 lines", fenced: false},
-		{name: "errored untrusted result untouched", tool: "fetch_url", content: "http 404 fetching x.test", isError: true, fenced: false},
+		{name: "errored untrusted result is fenced", tool: "fetch_url", content: "http 404 fetching x.test", isError: true, fenced: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -870,17 +870,13 @@ func TestAgentCarriesUntrustedOutputToRemember(t *testing.T) {
 	}
 }
 
-func TestAgentDoesNotTaintRememberInSameToolBatchOrNextTurn(t *testing.T) {
+func TestAgentTaintsRememberFromProjectedHistory(t *testing.T) {
 	t.Parallel()
 	gw := &scriptedGateway{scripts: [][]stream.StreamEvent{
-		toolCallStep([2]string{"fetch_url", "{\"url\":\"https://x.test\"}"}, [2]string{"remember", "{\"content\":\"user fact\"}"}),
-		finalStep("first turn done"),
-		toolCallStep([2]string{"fetch_url", "{\"url\":\"https://x.test\"}"}),
-		finalStep("second turn done"),
 		toolCallStep([2]string{"remember", "{\"content\":\"another user fact\"}"}),
-		finalStep("third turn done"),
+		finalStep("done"),
 	}}
-	seen := make(chan bool, 2)
+	seen := make(chan bool, 1)
 	a, _, _, _ := testAgent(t, gw,
 		&tools.Tool{
 			Name:        "fetch_url",
@@ -902,19 +898,52 @@ func TestAgentDoesNotTaintRememberInSameToolBatchOrNextTurn(t *testing.T) {
 		},
 	)
 
-	for range 3 {
-		ch, err := a.Start(t.Context(), Request{SessionID: "s1", Route: "coding"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		collect(t, ch)
+	ch, err := a.Start(t.Context(), Request{
+		SessionID: "s1", Route: "coding",
+		Messages: []provider.Message{{Role: "user", Content: "prior context", Untrusted: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if first, second := <-seen, <-seen; first || second {
-		t.Fatalf("remember taint values = [%v %v], want [false false]", first, second)
+	collect(t, ch)
+	if got := <-seen; !got {
+		t.Fatal("remember did not receive taint from projected history")
 	}
 }
 
-func TestAgentDoesNotTaintRememberAfterFailedUntrustedTool(t *testing.T) {
+func TestAgentAllowsTaintedRememberInUnattendedMission(t *testing.T) {
+	t.Parallel()
+	gw := &scriptedGateway{scripts: [][]stream.StreamEvent{
+		toolCallStep([2]string{"remember", `{"content":"mission source fact"}`}),
+		finalStep("done"),
+	}}
+	seen := make(chan bool, 1)
+	a, _, _, _ := testAgent(t, gw,
+		&tools.Tool{
+			Name:        "remember",
+			Description: "stores a memory",
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+			Trusted:     true,
+			Execute: func(ctx context.Context, _ json.RawMessage) (string, error) {
+				seen <- tools.UntrustedToolOutputSeen(ctx)
+				return "review queued", nil
+			},
+		},
+	)
+
+	ch, err := a.Start(t.Context(), Request{
+		SessionID: "s1", MissionID: "m1", Route: "coding", Unattended: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collect(t, ch)
+	if got := <-seen; !got {
+		t.Fatal("unattended mission remember did not receive untrusted state")
+	}
+}
+
+func TestAgentTaintsRememberAfterFailedUntrustedTool(t *testing.T) {
 	t.Parallel()
 	gw := &scriptedGateway{scripts: [][]stream.StreamEvent{
 		toolCallStep([2]string{"fetch_url", "{\"url\":\"https://x.test\"}"}),
@@ -947,8 +976,8 @@ func TestAgentDoesNotTaintRememberAfterFailedUntrustedTool(t *testing.T) {
 		t.Fatal(err)
 	}
 	collect(t, ch)
-	if got := <-seen; got {
-		t.Fatal("failed untrusted tool output tainted the turn")
+	if got := <-seen; !got {
+		t.Fatal("failed untrusted tool output did not taint the turn")
 	}
 }
 

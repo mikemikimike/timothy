@@ -108,7 +108,7 @@ func TestUntrustedToolOutputRememberIsPendingInStore(t *testing.T) {
 	content := prefix + "weekly reports go to reports@example.com"
 	var savedID, savedStatus string
 	remember := builtin.Remember(func(ctx context.Context, fact, memoryType string) (string, string, error) {
-		id, status, err := client.Add(ctx, fact, memoryType, tools.UntrustedToolOutputSeen(ctx))
+		id, status, err := client.Add(ctx, fact, memoryType, !tools.UntrustedToolOutputSeen(ctx))
 		if err == nil {
 			savedID, savedStatus = id, status
 		}

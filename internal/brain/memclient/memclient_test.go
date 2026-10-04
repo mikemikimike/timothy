@@ -12,7 +12,7 @@ import (
 	"github.com/SumonMSelim/timothy/internal/memory/retrieval"
 )
 
-func TestAddCarriesReviewGateAndStatus(t *testing.T) {
+func TestAddDefaultsUntrustedRequestToPendingAndReturnsStatus(t *testing.T) {
 	t.Parallel()
 	var got map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -24,19 +24,19 @@ func TestAddCarriesReviewGateAndStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	id, status, err := New(srv.URL).Add(context.Background(), "page fact", "semantic", true)
+	id, status, err := New(srv.URL).Add(context.Background(), "page fact", "semantic", false)
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	if id != "m1" || status != "pending" {
 		t.Fatalf("Add = (%q, %q), want (m1, pending)", id, status)
 	}
-	if got["require_review"] != true {
-		t.Fatalf("request require_review = %v, want true", got["require_review"])
+	if got["trusted"] != false {
+		t.Fatalf("request trusted = %v, want false", got["trusted"])
 	}
 }
 
-func TestAddAcceptsActiveStatusAndFalseReviewGate(t *testing.T) {
+func TestAddAcceptsActiveStatusWhenCallerIsTrusted(t *testing.T) {
 	t.Parallel()
 	var got map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -45,15 +45,15 @@ func TestAddAcceptsActiveStatusAndFalseReviewGate(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	id, status, err := New(srv.URL).Add(context.Background(), "fact", "semantic", false)
+	id, status, err := New(srv.URL).Add(context.Background(), "fact", "semantic", true)
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	if id != "m2" || status != "active" {
 		t.Fatalf("Add = (%q, %q), want (m2, active)", id, status)
 	}
-	if got["require_review"] != false {
-		t.Fatalf("request require_review = %v, want false", got["require_review"])
+	if got["trusted"] != true {
+		t.Fatalf("request trusted = %v, want true", got["trusted"])
 	}
 }
 

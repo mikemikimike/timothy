@@ -489,12 +489,15 @@ export async function listMemories(
   return memories ?? []
 }
 
-export async function addMemory(content: string, type = 'semantic'): Promise<string> {
-  const { id } = await request<{ id: string }>('/v1/memories', {
+export async function addMemory(
+  content: string,
+  type = 'semantic',
+): Promise<{ id: string; status: 'active' | 'pending' | 'dropped' }> {
+  const result = await request<{ id: string; status: 'active' | 'pending' | 'dropped' }>('/v1/memories', {
     method: 'POST',
-    body: JSON.stringify({ content, type }),
+    body: JSON.stringify({ content, type, trusted: true }),
   })
-  return id
+  return result
 }
 
 // resolveMemory answers a queue card. Pass content to edit-then-confirm.

@@ -92,6 +92,36 @@ func TestLLMContextCarriesImageRefsNotBytes(t *testing.T) {
 	if len(m.ImageRefs) != 1 || m.ImageRefs[0].ID != "abc123" || m.ImageRefs[0].Mime != "image/png" {
 		t.Fatalf("ImageRefs = %+v, want one ref to abc123/image/png", m.ImageRefs)
 	}
+	if !m.Untrusted {
+		t.Fatal("image-bearing message is not marked untrusted")
+	}
+}
+
+func TestLLMContextTaintsHistoryFromUntrustedToolExecution(t *testing.T) {
+	t.Parallel()
+	events := []Event{
+		user(t, 1, "first turn"),
+		// TrustKnown is absent on legacy events; a non-empty result must
+		// remain tainted when it appears in a later turn's history.
+		ev(t, 2, KindToolExecution, ToolExecution{Name: "fetch_url", Status: "error", ResultDigest: "http 404"}),
+		assistant(t, 3, "page lookup failed", nil),
+		ev(t, 4, KindCompactionApplied, CompactionApplied{
+			Summary: "the page lookup failed", ReplacesThroughSeq: 3,
+		}),
+		user(t, 5, "remember what it said"),
+	}
+	msgs, err := LLMContext(events, 0)
+	if err != nil {
+		t.Fatalf("LLMContext: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("messages = %+v, want summary and current user message", msgs)
+	}
+	for i, message := range msgs {
+		if !message.Untrusted {
+			t.Fatalf("message %d is not tainted by the prior external error: %+v", i, message)
+		}
+	}
 }
 
 // TestLLMContextRendersDocumentMarkdown confirms a user_message's
@@ -120,6 +150,9 @@ func TestLLMContextRendersDocumentMarkdown(t *testing.T) {
 	if !strings.Contains(m.Content, "summarize this") || !strings.Contains(m.Content, "# Title") ||
 		!strings.Contains(m.Content, "body text") || !strings.Contains(m.Content, "doc1") {
 		t.Fatalf("Content = %q, want text + rendered document markdown", m.Content)
+	}
+	if !m.Untrusted {
+		t.Fatal("referenced document is not marked untrusted")
 	}
 }
 

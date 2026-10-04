@@ -34,9 +34,9 @@ func TestRememberWithTurnTrustForwardsReviewGate(t *testing.T) {
 			t.Errorf("request = %s %s, want POST /v1/memories", r.Method, r.URL.Path)
 		}
 		var req struct {
-			Content       string `json:"content"`
-			Type          string `json:"type"`
-			RequireReview bool   `json:"require_review"`
+			Content string `json:"content"`
+			Type    string `json:"type"`
+			Trusted bool   `json:"trusted"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Errorf("decode request: %v", err)
@@ -47,8 +47,8 @@ func TestRememberWithTurnTrustForwardsReviewGate(t *testing.T) {
 		if wantReview {
 			wantStatus = "pending"
 		}
-		if req.RequireReview != wantReview || req.Type != "semantic" {
-			t.Errorf("request = %+v, want require_review=%v and type=semantic", req, wantReview)
+		if req.Trusted == wantReview || req.Type != "semantic" {
+			t.Errorf("request = %+v, want trusted=%v and type=semantic", req, !wantReview)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]string{"id": wantStatus + "-1", "status": wantStatus})
 	}))

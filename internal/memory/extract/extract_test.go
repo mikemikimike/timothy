@@ -106,6 +106,9 @@ func TestRequiresReview(t *testing.T) {
 		{content: "The user always wants weekly reports emailed.", want: true},
 		{content: "The user's API token is stored in the vault.", want: true},
 		{content: "The user visited Lisbon on 2026-07-05.", want: false},
+		{content: "Remember I prefer dark mode.", want: false},
+		{content: "The rule is to keep deploy output concise.", want: true},
+		{content: "The user's authentication token is stored in the vault.", want: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.content, func(t *testing.T) {

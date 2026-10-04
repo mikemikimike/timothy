@@ -78,9 +78,9 @@ func (a *API) handleList(w http.ResponseWriter, r *http.Request) {
 // stays pending for review; clean explicit memories still activate.
 func (a *API) handleAdd(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Content       string `json:"content"`
-		Type          string `json:"type,omitempty"`
-		RequireReview bool   `json:"require_review,omitempty"`
+		Content string `json:"content"`
+		Type    string `json:"type,omitempty"`
+		Trusted bool   `json:"trusted,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, http.StatusBadRequest, "bad_request", err.Error())
@@ -98,7 +98,7 @@ func (a *API) handleAdd(w http.ResponseWriter, r *http.Request) {
 	m := store.Memory{
 		Type: store.MemoryType(req.Type), Content: req.Content,
 		Actor: store.ActorUser, Confidence: 1,
-		RequireReview: req.RequireReview || extract.RequiresReview(req.Content),
+		RequireReview: !req.Trusted || extract.RequiresReview(req.Content),
 	}
 	// Best-effort embedding: a memory without a vector still serves the
 	// text and entity legs, though similarity checks are unavailable.
@@ -124,7 +124,15 @@ func (a *API) handleAdd(w http.ResponseWriter, r *http.Request) {
 				writeAddResult(w, "", "dropped")
 				return
 			case store.StatusPending:
-				a.log.Info("memory duplicate matched pending row; skipped",
+				if req.Trusted && !m.RequireReview {
+					if err := a.store.Promote(r.Context(), dupID); err != nil {
+						jsonError(w, http.StatusInternalServerError, "promote_failed", err.Error())
+						return
+					}
+					writeAddResult(w, dupID, string(store.StatusActive))
+					return
+				}
+				a.log.Info("memory duplicate matched pending row; kept for review",
 					"of", dupID, "similarity", similarity)
 				writeAddResult(w, dupID, string(store.StatusPending))
 				return

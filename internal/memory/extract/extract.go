@@ -412,10 +412,16 @@ func boundedWindow(content string) bool {
 // without review. Keyword matching can never be complete; the fence
 // (D-011 trust="data") is the containment for what slips through.
 var sensitive = regexp.MustCompile(`(?i)` +
-	`password|passphrase|token|secret|credential|api.?key|private.?key|ssh|vault|` +
-	`always |never |prefer|instruct|direct(ed|s|ive)|require|rule|policy|` +
-	`must |shall |should |do not |don't |ensure |make sure |` +
-	`from now on|going forward|all future`)
+	`\b(password|passphrase|secret|credential|api[ -]?key|private[ -]?key|ssh key|access token|api token|auth(?:entication)? token|vault)\b|` +
+	`\b(always|never)\s+(?:wants?\b|use\b|send\b|share\b|store\b|delete\b|run\b|include\b|exclude\b|email\b|write\b|keep\b)|` +
+	`\b(instruct(ed|s|ion)?|direct(ed|s|ive)?|require(d|s|ment)?)\b|` +
+	`\b(?:the )?(?:rule|policy|instruction)\s+(?:is|says|requires|states)\b|` +
+	`\b(must|shall|should|ensure)\b|\bdo not\b|\bdon't\b|\bmake sure\b|` +
+	`\bfrom now on\b|\bgoing forward\b|\ball future\b`)
+
+// Extraction stays conservative for preferences and rule-like facts even
+// though clean, user-entered memory adds may activate those values.
+var autoPromotionVeto = regexp.MustCompile(`(?i)\b(prefer|rule)\b`)
 
 // AutoPromote is the promotion policy - code, not LLM (D-011).
 // Episodic observations with high confidence activate directly;
@@ -429,7 +435,7 @@ func AutoPromote(f Fact) bool {
 	if f.Confidence < autoPromoteConfidence {
 		return false
 	}
-	return !RequiresReview(f.Content)
+	return !RequiresReview(f.Content) && !autoPromotionVeto.MatchString(f.Content)
 }
 
 // RequiresReview reports whether content matches the conservative

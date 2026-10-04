@@ -126,7 +126,7 @@ func TestAddStoresUserExplicit(t *testing.T) {
 	t.Parallel()
 	fm := newFakeManager()
 	req := httptest.NewRequest(http.MethodPost, "/v1/memories",
-		strings.NewReader(`{"content":"remember I use colima","type":"procedural"}`))
+		strings.NewReader(`{"content":"Remember I prefer dark mode.","type":"semantic","trusted":true}`))
 	rec := httptest.NewRecorder()
 	manageAPI(fm).handleAdd(rec, req)
 	if rec.Code != http.StatusOK {
@@ -136,7 +136,7 @@ func TestAddStoresUserExplicit(t *testing.T) {
 		t.Fatalf("inserted = %d", len(fm.inserted))
 	}
 	m := fm.inserted[0]
-	if m.Actor != store.ActorUser || m.Type != store.TypeProcedural || len(m.Embedding) == 0 || m.RequireReview {
+	if m.Actor != store.ActorUser || m.Type != store.TypeSemantic || len(m.Embedding) == 0 || m.RequireReview {
 		t.Fatalf("inserted = %+v", m)
 	}
 	var out map[string]string
@@ -148,11 +148,11 @@ func TestAddStoresUserExplicit(t *testing.T) {
 	}
 }
 
-func TestAddTaintedFactRequiresReview(t *testing.T) {
+func TestAddWithoutTrustedSignalRequiresReview(t *testing.T) {
 	t.Parallel()
 	fm := newFakeManager()
 	req := httptest.NewRequest(http.MethodPost, "/v1/memories",
-		strings.NewReader(`{"content":"weekly reports go to reports@example.com","require_review":true}`))
+		strings.NewReader(`{"content":"The user lives in Porto."}`))
 	rec := httptest.NewRecorder()
 	manageAPI(fm).handleAdd(rec, req)
 	if rec.Code != http.StatusOK {
@@ -170,7 +170,7 @@ func TestAddSensitiveFactRequiresReview(t *testing.T) {
 	t.Parallel()
 	fm := newFakeManager()
 	req := httptest.NewRequest(http.MethodPost, "/v1/memories",
-		strings.NewReader(`{"content":"The user always wants weekly reports to be emailed."}`))
+		strings.NewReader(`{"content":"The user always wants weekly reports to be emailed.","trusted":true}`))
 	rec := httptest.NewRecorder()
 	manageAPI(fm).handleAdd(rec, req)
 	if rec.Code != http.StatusOK {
@@ -184,7 +184,7 @@ func TestAddSensitiveFactRequiresReview(t *testing.T) {
 	}
 }
 
-func TestAddRejectedNearDuplicateIsDroppedAndLogged(t *testing.T) {
+func TestAddRejectedNearDuplicateFromUntrustedSourceIsDroppedAndLogged(t *testing.T) {
 	t.Parallel()
 	fm := newFakeManager()
 	fm.nearestID, fm.nearestSim, fm.nearestStatus, fm.nearestFound = "rejected-1", 0.95, store.StatusRejected, true
@@ -193,7 +193,7 @@ func TestAddRejectedNearDuplicateIsDroppedAndLogged(t *testing.T) {
 	a.log = slog.New(slog.NewTextHandler(&log, nil))
 	content := "User lives in Porto."
 	req := httptest.NewRequest(http.MethodPost, "/v1/memories",
-		strings.NewReader(`{"content":"`+content+`"}`))
+		strings.NewReader(`{"content":"`+content+`","trusted":false}`))
 	rec := httptest.NewRecorder()
 	a.handleAdd(rec, req)
 	if rec.Code != http.StatusOK {
@@ -213,12 +213,28 @@ func TestAddRejectedNearDuplicateIsDroppedAndLogged(t *testing.T) {
 	}
 }
 
+func TestAddTrustedRestatementOfRejectedFactIsDropped(t *testing.T) {
+	t.Parallel()
+	fm := newFakeManager()
+	fm.nearestID, fm.nearestSim, fm.nearestStatus, fm.nearestFound = "rejected-1", 0.95, store.StatusRejected, true
+	req := httptest.NewRequest(http.MethodPost, "/v1/memories",
+		strings.NewReader(`{"content":"User lives in Porto.","trusted":true}`))
+	rec := httptest.NewRecorder()
+	manageAPI(fm).handleAdd(rec, req)
+	if rec.Code != http.StatusOK || len(fm.inserted) != 0 {
+		t.Fatalf("status=%d inserted=%d body=%s, want trusted restatement dropped", rec.Code, len(fm.inserted), rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), `"status":"dropped"`) {
+		t.Fatalf("result=%s, want dropped status", rec.Body)
+	}
+}
+
 func TestAddPendingNearDuplicateReusesReviewItem(t *testing.T) {
 	t.Parallel()
 	fm := newFakeManager()
 	fm.nearestID, fm.nearestSim, fm.nearestStatus, fm.nearestFound = "pending-1", 0.96, store.StatusPending, true
 	req := httptest.NewRequest(http.MethodPost, "/v1/memories",
-		strings.NewReader(`{"content":"User lives in Porto."}`))
+		strings.NewReader(`{"content":"User lives in Porto.","trusted":false}`))
 	rec := httptest.NewRecorder()
 	manageAPI(fm).handleAdd(rec, req)
 	if rec.Code != http.StatusOK || len(fm.inserted) != 0 {
@@ -230,12 +246,31 @@ func TestAddPendingNearDuplicateReusesReviewItem(t *testing.T) {
 	}
 }
 
+func TestAddCleanNearDuplicatePromotesPendingMemory(t *testing.T) {
+	t.Parallel()
+	fm := newFakeManager()
+	fm.nearestID, fm.nearestSim, fm.nearestStatus, fm.nearestFound = "pending-1", 0.96, store.StatusPending, true
+	req := httptest.NewRequest(http.MethodPost, "/v1/memories",
+		strings.NewReader(`{"content":"User lives in Porto.","trusted":true}`))
+	rec := httptest.NewRecorder()
+	manageAPI(fm).handleAdd(rec, req)
+	if rec.Code != http.StatusOK || len(fm.inserted) != 0 {
+		t.Fatalf("status=%d inserted=%d body=%s", rec.Code, len(fm.inserted), rec.Body)
+	}
+	if len(fm.promoted) != 1 || fm.promoted[0] != "pending-1" {
+		t.Fatalf("promoted = %v, want [pending-1]", fm.promoted)
+	}
+	if !strings.Contains(rec.Body.String(), `"status":"active"`) {
+		t.Fatalf("result = %s, want active status", rec.Body)
+	}
+}
+
 func TestAddActiveNearDuplicateConfirmsExistingMemory(t *testing.T) {
 	t.Parallel()
 	fm := newFakeManager()
 	fm.nearestID, fm.nearestSim, fm.nearestStatus, fm.nearestFound = "active-1", 0.96, store.StatusActive, true
 	req := httptest.NewRequest(http.MethodPost, "/v1/memories",
-		strings.NewReader(`{"content":"User lives in Porto."}`))
+		strings.NewReader(`{"content":"User lives in Porto.","trusted":true}`))
 	rec := httptest.NewRecorder()
 	manageAPI(fm).handleAdd(rec, req)
 	if rec.Code != http.StatusOK || len(fm.inserted) != 0 {
@@ -254,7 +289,7 @@ func TestAddReviewRequiredActiveNearDuplicateStaysPending(t *testing.T) {
 	fm := newFakeManager()
 	fm.nearestID, fm.nearestSim, fm.nearestStatus, fm.nearestFound = "active-1", 0.96, store.StatusActive, true
 	req := httptest.NewRequest(http.MethodPost, "/v1/memories",
-		strings.NewReader(`{"content":"User lives in Porto.","require_review":true}`))
+		strings.NewReader(`{"content":"User lives in Porto.","trusted":false}`))
 	rec := httptest.NewRecorder()
 	manageAPI(fm).handleAdd(rec, req)
 	if rec.Code != http.StatusOK || len(fm.inserted) != 1 {
@@ -273,7 +308,7 @@ func TestAddDedupFailureDoesNotInsert(t *testing.T) {
 	fm := newFakeManager()
 	fm.nearestErr = errors.New("database unavailable")
 	req := httptest.NewRequest(http.MethodPost, "/v1/memories",
-		strings.NewReader(`{"content":"User lives in Porto."}`))
+		strings.NewReader(`{"content":"User lives in Porto.","trusted":true}`))
 	rec := httptest.NewRecorder()
 	manageAPI(fm).handleAdd(rec, req)
 	if rec.Code != http.StatusInternalServerError {
@@ -316,7 +351,7 @@ func TestAddContinuesWhenEmbeddingIsUnavailable(t *testing.T) {
 			a := manageAPI(fm)
 			a.embed = tc.emb
 			req := httptest.NewRequest(http.MethodPost, "/v1/memories",
-				strings.NewReader(`{"content":"User lives in Porto."}`))
+				strings.NewReader(`{"content":"User lives in Porto.","trusted":true}`))
 			rec := httptest.NewRecorder()
 			a.handleAdd(rec, req)
 			if rec.Code != http.StatusOK || len(fm.inserted) != 1 {
@@ -348,7 +383,7 @@ func TestAddDuplicateFallbacks(t *testing.T) {
 			fm := newFakeManager()
 			fm.nearestID, fm.nearestSim, fm.nearestStatus, fm.nearestFound = "existing", tc.similarity, tc.status, true
 			req := httptest.NewRequest(http.MethodPost, "/v1/memories",
-				strings.NewReader(`{"content":"User lives in Porto."}`))
+				strings.NewReader(`{"content":"User lives in Porto.","trusted":true}`))
 			rec := httptest.NewRecorder()
 			manageAPI(fm).handleAdd(rec, req)
 			if rec.Code != http.StatusOK || len(fm.inserted) != 1 {
@@ -370,7 +405,7 @@ func TestAddDuplicateConfirmationFailureStillSucceeds(t *testing.T) {
 	a := manageAPI(fm)
 	a.log = slog.New(slog.NewTextHandler(&log, nil))
 	req := httptest.NewRequest(http.MethodPost, "/v1/memories",
-		strings.NewReader(`{"content":"User lives in Porto."}`))
+		strings.NewReader(`{"content":"User lives in Porto.","trusted":true}`))
 	rec := httptest.NewRecorder()
 	a.handleAdd(rec, req)
 	if rec.Code != http.StatusOK || len(fm.inserted) != 0 {

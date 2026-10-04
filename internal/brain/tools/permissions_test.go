@@ -437,19 +437,13 @@ func TestNoteToolExemption(t *testing.T) {
 	}
 }
 
-func TestRememberPermissionExemptionIsTurnScoped(t *testing.T) {
+func TestRememberPermissionExemptionAllowsPendingReviewWrites(t *testing.T) {
 	t.Parallel()
 	p := NewPermissions(nil, "/workspace")
-	ctx := context.Background()
-
-	if !p.isExempt(ctx, "remember") {
-		t.Fatal("remember should be exempt before untrusted output")
+	if !p.isExempt("remember") {
+		t.Fatal("remember should remain exempt because memoryd queues tainted writes")
 	}
-	tainted := WithUntrustedToolOutputSeen(ctx)
-	if p.isExempt(tainted, "remember") {
-		t.Fatal("remember stayed exempt after untrusted output")
-	}
-	if !p.isExempt(tainted, "search_web") {
-		t.Fatal("untrusted output changed unrelated tool exemptions")
+	if !p.isExempt("search_web") {
+		t.Fatal("search_web should remain exempt")
 	}
 }

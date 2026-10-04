@@ -67,15 +67,15 @@ func (c *Client) Extract(ctx context.Context, sessionID string, sourceSeq int64,
 	return out.MemoryIDs, nil
 }
 
-// Add stores a user-explicit memory unless the turn's Go-side trust
-// gate requires review; it returns the id and resulting status.
-func (c *Client) Add(ctx context.Context, content, memoryType string, requireReview bool) (string, string, error) {
+// Add stores a memory. An untrusted caller defaults to the review queue;
+// only an explicit trusted signal can activate a clean user memory.
+func (c *Client) Add(ctx context.Context, content, memoryType string, trusted bool) (string, string, error) {
 	body, err := json.Marshal(struct {
-		Content       string `json:"content"`
-		Type          string `json:"type"`
-		RequireReview bool   `json:"require_review"`
+		Content string `json:"content"`
+		Type    string `json:"type"`
+		Trusted bool   `json:"trusted"`
 	}{
-		Content: content, Type: memoryType, RequireReview: requireReview,
+		Content: content, Type: memoryType, Trusted: trusted,
 	})
 	if err != nil {
 		return "", "", fmt.Errorf("memclient: marshal: %w", err)

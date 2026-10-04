@@ -162,7 +162,9 @@ type AssistantTurn struct {
 	Currency string   `json:"currency,omitempty"`
 }
 
-// ToolExecution stores a digest only; full results are transient.
+// ToolExecution stores a digest and the result's trust classification;
+// full results are transient. TrustKnown distinguishes new rows from
+// legacy rows, whose non-empty results are treated as untrusted.
 type ToolExecution struct {
 	CallID       string `json:"call_id"`
 	Name         string `json:"name"`
@@ -170,6 +172,8 @@ type ToolExecution struct {
 	ResultDigest string `json:"result_digest,omitempty"`
 	Status       string `json:"status"`
 	DurationMs   int64  `json:"duration_ms,omitempty"`
+	Untrusted    bool   `json:"untrusted,omitempty"`
+	TrustKnown   bool   `json:"trust_known,omitempty"`
 }
 
 // CompactionApplied replaces every event up to and including
@@ -178,6 +182,7 @@ type CompactionApplied struct {
 	Summary            string   `json:"summary"`
 	ReplacesThroughSeq int64    `json:"replaces_through_seq"`
 	FactsExtracted     []string `json:"facts_extracted"`
+	Untrusted          bool     `json:"untrusted,omitempty"`
 }
 
 // PendingState holds a turn's accumulated deltas when it ended

@@ -2018,15 +2018,15 @@ func (r turnRouter) RouteForRole(ctx context.Context, role string) (string, bool
 	return r.gw.RouteForRole(ctx, role)
 }
 
-// buildAgent assembles the compiled-in tool registry and its guard
-// rails (D-009, D-010). The returned builtin set is the fixed half of
-// the tool surface; connector tools join it via swapAgentTools.
 func rememberWithTurnTrust(mc *memclient.Client) builtin.RememberFunc {
 	return func(ctx context.Context, content, memoryType string) (string, string, error) {
-		return mc.Add(ctx, content, memoryType, tools.UntrustedToolOutputSeen(ctx))
+		return mc.Add(ctx, content, memoryType, !tools.UntrustedToolOutputSeen(ctx))
 	}
 }
 
+// buildAgent assembles the compiled-in tool registry and its guard
+// rails (D-009, D-010). The returned builtin set is the fixed half of
+// the tool surface; connector tools join it via swapAgentTools.
 func buildAgent(gwc *gwclient.Client, store *session.Store, db *pgpool.Pool, workspace, searxngURL, markitdownURL string, packs []skills.Skill, skillAllow func(context.Context, string) bool, defaultLoc func(context.Context) *time.Location, remember builtin.RememberFunc, log *slog.Logger, toolCalls *prometheus.CounterVec, sensitiveRoute func(context.Context) string, fxStore *fxrates.Store, kbEnrich *kb.Enricher) (*loop.Agent, *loop.PermBroker, *tools.Outputs, []*tools.Tool, *tools.Permissions, error) {
 	outputs := tools.NewOutputs(db)
 	set := []*tools.Tool{
