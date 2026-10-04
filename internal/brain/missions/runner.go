@@ -1613,7 +1613,7 @@ func discoverToolchainNudge(m Mission) string {
 	case "installed":
 		return " Toolchains installed: " + list + ". Do not reinstall them."
 	case "failed":
-		return " The harness tried to install the repo's pinned toolchains (" + list + ") in the sandbox and failed. Say so in your findings and set stack to the project's language: the plan's first unit may be a bootstrap unit (bootstrap: true) that installs the toolchain into the workspace."
+		return " The harness tried to install the repo's pinned toolchains (" + list + ") in the sandbox and failed. Say so in your findings and set stack to the project's language: the plan's first unit may be a " + bootstrapAllowance + " that installs the toolchain into the workspace."
 	}
 	return ""
 }
@@ -1643,10 +1643,10 @@ func (r *nativeRunner) applyDiscoverReport(ctx context.Context, m Mission, repor
 	if stack == "" {
 		return report.Findings
 	}
-	if m.ToolchainInstall != "failed" && stackCoveredByEnvironment(stack, m.Environment, strings.ToLower(strings.TrimSpace(report.Environment))) {
+	if m.ToolchainInstall != "failed" && (stackCoveredByEnvironment(stack, m.Environment, strings.ToLower(strings.TrimSpace(report.Environment))) || stackNeedsNoToolchain(stack)) {
 		return report.Findings
 	}
-	return fmt.Sprintf("Stack: %s. The sandbox has no preinstalled toolchain for it; the plan's first unit must be a bootstrap unit (bootstrap: true) that installs it into the workspace.\n\n%s", NeutralizeSlot(stack), report.Findings)
+	return fmt.Sprintf("Stack: %s. The sandbox has no preinstalled toolchain for it; the plan's first unit must be a " + bootstrapAllowance + " that installs it into the workspace.\n\n%s", NeutralizeSlot(stack), report.Findings)
 }
 
 // stackWords maps an environment image to the words a discover stack
@@ -1659,13 +1659,46 @@ var stackWords = map[string][]string{
 	"php":    {"php", "laravel", "symfony", "composer"},
 }
 
+// noToolchainStackWords are stack words for formats the base image
+// already handles, plus filler. A stack made only of these ("Markdown
+// documentation", "YAML config files") needs no bootstrap.
+var noToolchainStackWords = map[string]bool{
+	"markdown": true, "md": true, "documentation": true, "docs": true, "doc": true,
+	"text": true, "txt": true, "plain": true, "prose": true, "readme": true,
+	"html": true, "css": true, "yaml": true, "yml": true, "json": true, "toml": true, "csv": true,
+	"shell": true, "bash": true, "sh": true, "posix": true,
+	"and": true, "or": true, "with": true, "only": true, "a": true, "the": true, "of": true,
+	"file": true, "files": true, "project": true, "repository": true, "repo": true, "config": true,
+}
+
+// stackNeedsNoToolchain reports whether every word of a discover stack
+// is a no-toolchain format or filler (issue #996).
+func stackNeedsNoToolchain(stack string) bool {
+	words := stackWordList(stack)
+	if len(words) == 0 {
+		return false
+	}
+	for _, w := range words {
+		if !noToolchainStackWords[w] {
+			return false
+		}
+	}
+	return true
+}
+
+// stackWordList lowercases a stack and splits it on anything not a
+// letter or digit.
+func stackWordList(stack string) []string {
+	return strings.FieldsFunc(strings.ToLower(stack), func(r rune) bool {
+		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
+	})
+}
+
 // stackCoveredByEnvironment reports whether a discover stack names the
 // language of one of envs' images. Weak models fill stack even when the
 // image carries the toolchain; the bootstrap note must not follow.
 func stackCoveredByEnvironment(stack string, envs ...string) bool {
-	words := strings.FieldsFunc(strings.ToLower(stack), func(r rune) bool {
-		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
-	})
+	words := stackWordList(stack)
 	for _, env := range envs {
 		for _, want := range stackWords[env] {
 			if slices.Contains(words, want) {
@@ -1983,7 +2016,24 @@ func reportInProgress(p ReviewPacket) bool {
 // (D-077), and assumptions. Kept as one shared string so
 // build/prove's unit parsing (parsePlan) never has to distinguish
 // which mode produced a plan.
-const planUnitShapeRules = " Every unit must list at least one artifact, the workspace-relative file(s) the unit must produce (for a report-style goal, the report file itself is the artifact); the harness itself checks each exists and is non-empty, so name the real deliverables. If the unit's deliverable is a side effect rather than a file (a GitHub issue, an API call, external state that check_cmd can itself observe, e.g. `gh issue list --json number --jq 'length' | awk '$1>=8'`), set evidence_only=true instead and omit artifacts; check_cmd is still a gate, so it must fail against the workspace as it stands now and pass once the side effect exists. Never drop a deliverable the goal asks for just because it produces no file: use an evidence-only unit, or, if the sandbox genuinely cannot perform it (no credential, no tool in the allowlist), say so by calling submit_plan with infeasible=true and a reason naming exactly what cannot be done, or ask_user if it is ambiguous rather than achievable, instead of silently narrowing the plan to the parts that produce files. Every unit must also list 2 to 6 acceptance criteria: short single lines taken from the goal stating what the unit's output must satisfy (constraints, required content, format), because the reviewer judges the unit against these criteria rather than the goal text; name the artifact file in a criterion when judging it requires reading its contents. Optionally list scope: the workspace-relative files or directories the unit may touch (defaults to the artifact directories). check_cmd is executed literally as `/bin/sh -c \"<check_cmd>\"` in the mission's own workspace directory; it must be a real POSIX shell command (using binaries like grep, test, wc, NOT a tool name from your own tool list, which does not exist as a shell command). It is a gate, not a proof: it must FAIL against the workspace as it stands now and PASS once the unit's work exists, and the harness runs it once at plan acceptance to confirm the first half, rejecting a gate that already passes. For a unit whose artifacts are source files it must build, test or run them with the environment's toolchain (`go test ./pkg/...`, `python3 -m pytest tests/`, `npm test`); a grep against source only proves text is present, so greps may accompany the toolchain call but never stand alone. A toolchain call alone passes while the unit's files are still missing (`go test ./pkg/ -run TestX` exits 0 when no test file exists, `gofmt -l` prints nothing for absent files, pytest collects nothing), so anchor each code unit's check_cmd on a symbol the unit adds, e.g. `grep -q 'func TestBase62' internal/core/base62_test.go && go test ./internal/core/ -run TestBase62`. For document artifacts check CONTENT (e.g. grep -qi 'retry-after' summary.md), never a bare echo, which proves nothing. Never use command substitution ($(...) or backticks) in check_cmd; write the direct command instead; for a line-count check use awk, e.g. `awk 'END{exit NR<10}' report.md`, NEVER `test $(wc -l ...)`; to assert a command prints nothing (gofmt -l, a linter) pipe it into `awk 'END{exit NR>0}'`, NEVER `grep -q '^$'`, which exits 1 on empty input. Do not add a separate final \"format and verify\" unit: put the toolchain call in every code unit's own check_cmd. For a small coding change (at most 8 source files, all in one directory or package), submit ONE unit covering all of them rather than one unit per file, since each extra unit costs a separate session and review round. The harness commits each unit's files itself after the worker turn, so criteria and check_cmd must judge file CONTENT only, never git status, staging, untracked, or uncommitted state. Use paths relative to the workspace; never /tmp or any absolute path outside it, since the worker's shell is confined to the workspace. If the goal cannot be achieved as stated (it forbids the only possible action, contradicts what actually exists in the workspace, or is self-contradictory), do not invent a workaround plan: call submit_plan with infeasible=true and a reason instead of units. When the discover findings say the sandbox lacks the toolchain, make the FIRST unit a toolchain bootstrap with bootstrap=true: the sandbox has no root, so it installs into the workspace (e.g. `./.tools/`) and its check_cmd runs the installed binary by its workspace-relative path; later units call the toolchain the same way. Without such a unit, any check_cmd using a missing command is rejected. If the goal left something ambiguous and you resolved it silently, list it in assumptions with the default you chose (e.g. \"no language version was specified\" -> \"Python 3.12\", \"output format unspecified\" -> \"single markdown file\"); leave assumptions empty when nothing was ambiguous. End your turn with exactly one submit_plan tool call."
+const planUnitShapeRules = " Every unit must list at least one artifact, the workspace-relative file(s) the unit must produce (for a report-style goal, the report file itself is the artifact); the harness itself checks each exists and is non-empty, so name the real deliverables. If the unit's deliverable is a side effect rather than a file (a GitHub issue, an API call, external state that check_cmd can itself observe, e.g. `gh issue list --json number --jq 'length' | awk '$1>=8'`), set evidence_only=true instead and omit artifacts; check_cmd is still a gate, so it must fail against the workspace as it stands now and pass once the side effect exists. Never drop a deliverable the goal asks for just because it produces no file: use an evidence-only unit, or, if the sandbox genuinely cannot perform it (no credential, no tool in the allowlist), say so by calling submit_plan with infeasible=true and a reason naming exactly what cannot be done, or ask_user if it is ambiguous rather than achievable, instead of silently narrowing the plan to the parts that produce files. Every unit must also list 2 to 6 acceptance criteria: short single lines taken from the goal stating what the unit's output must satisfy (constraints, required content, format), because the reviewer judges the unit against these criteria rather than the goal text; name the artifact file in a criterion when judging it requires reading its contents. Optionally list scope: the workspace-relative files or directories the unit may touch (defaults to the artifact directories). check_cmd is executed literally as `/bin/sh -c \"<check_cmd>\"` in the mission's own workspace directory; it must be a real POSIX shell command (using binaries like grep, test, wc, NOT a tool name from your own tool list, which does not exist as a shell command). It is a gate, not a proof: it must FAIL against the workspace as it stands now and PASS once the unit's work exists, and the harness runs it once at plan acceptance to confirm the first half, rejecting a gate that already passes. For a unit whose artifacts are source files it must build, test or run them with the environment's toolchain (`go test ./pkg/...`, `python3 -m pytest tests/`, `npm test`); a grep against source only proves text is present, so greps may accompany the toolchain call but never stand alone. A toolchain call alone passes while the unit's files are still missing (`go test ./pkg/ -run TestX` exits 0 when no test file exists, `gofmt -l` prints nothing for absent files, pytest collects nothing), so anchor each code unit's check_cmd on a symbol the unit adds, e.g. `grep -q 'func TestBase62' internal/core/base62_test.go && go test ./internal/core/ -run TestBase62`. For document artifacts check CONTENT (e.g. grep -qi 'retry-after' summary.md), never a bare echo, which proves nothing. Never use command substitution ($(...) or backticks) in check_cmd; write the direct command instead; for a line-count check use awk, e.g. `awk 'END{exit NR<10}' report.md`, NEVER `test $(wc -l ...)`; to assert a command prints nothing (gofmt -l, a linter) pipe it into `awk 'END{exit NR>0}'`, NEVER `grep -q '^$'`, which exits 1 on empty input. Do not add a separate final \"format and verify\" unit: put the toolchain call in every code unit's own check_cmd. For a small coding change (at most 8 source files, all in one directory or package), submit ONE unit covering all of them rather than one unit per file, since each extra unit costs a separate session and review round. The harness commits each unit's files itself after the worker turn, so criteria and check_cmd must judge file CONTENT only, never git status, staging, untracked, or uncommitted state. Use paths relative to the workspace; never /tmp or any absolute path outside it, since the worker's shell is confined to the workspace. If the goal cannot be achieved as stated (it forbids the only possible action, contradicts what actually exists in the workspace, or is self-contradictory), do not invent a workaround plan: call submit_plan with infeasible=true and a reason instead of units. If the goal left something ambiguous and you resolved it silently, list it in assumptions with the default you chose (e.g. \"no language version was specified\" -> \"Python 3.12\", \"output format unspecified\" -> \"single markdown file\"); leave assumptions empty when nothing was ambiguous. End your turn with exactly one submit_plan tool call."
+
+// planBootstrapRule is the D-124 bootstrap instruction. It is appended
+// only when bootstrapAllowed: a planner offered it unconditionally
+// planned "install Python" units for markdown explainers (issue #996).
+const planBootstrapRule = " When the discover findings say the sandbox lacks the toolchain, make the FIRST unit a toolchain bootstrap with bootstrap=true: the sandbox has no root, so it installs into the workspace (e.g. `./.tools/`) and its check_cmd runs the installed binary by its workspace-relative path; later units call the toolchain the same way. Without such a unit, any check_cmd using a missing command is rejected."
+
+// bootstrapAllowance is the phrase every harness note granting a
+// bootstrap unit carries (the discover stack note, the failed install
+// nudge, the failed recreate install); bootstrapAllowed looks for it.
+const bootstrapAllowance = "bootstrap unit (bootstrap: true)"
+
+// bootstrapAllowed reports whether the planner may be offered a
+// bootstrap unit: coding missions whose discover notes carry a harness
+// bootstrap allowance.
+func bootstrapAllowed(m Mission, discoverNotes string) bool {
+	return m.Kind == KindCoding && strings.Contains(discoverNotes, bootstrapAllowance)
+}
 
 // planSystemPrompt builds PlanSession's system prompt: the design-mode
 // opening (break the goal into units from scratch) or, when hasPlan is
@@ -1992,12 +2042,17 @@ const planUnitShapeRules = " Every unit must list at least one artifact, the wor
 // units faithfully instead of redesigning it. Either way the unit
 // shape (planUnitShapeRules) is identical, so build/prove need no
 // changes: the same D-077 infeasible and D-095 criteria checks apply
-// to a transcribed plan as to a designed one.
-func planSystemPrompt(hasPlan bool) string {
-	if hasPlan {
-		return "You are transcribing a mission plan. The goal below already contains the operator's own plan: convert it into an ordered list of verifiable units faithfully, preserving its steps and order. Do not redesign the plan, do not add scope or steps the operator didn't ask for, and do not merge or split steps the operator kept separate, except where the shape rules below force a split (one step whose own deliverable would truncate a single worker turn) or a merge (a small change inside one directory)." + planUnitShapeRules
+// to a transcribed plan as to a designed one. bootstrap appends
+// planBootstrapRule.
+func planSystemPrompt(hasPlan, bootstrap bool) string {
+	rules := planUnitShapeRules
+	if bootstrap {
+		rules += planBootstrapRule
 	}
-	return "You are planning one mission. Break the goal into the SMALLEST ordered list of verifiable units that achieves it: one unit is correct for a simple goal; never pad the plan. A worker turn is one continuous model generation: if a single unit's own deliverable would demand a very long uninterrupted output (many chapters, dozens of sections, a large multi-file dataset, or similar), a long stream is more likely to truncate mid-generation, so split that unit along its own natural boundaries (one unit per chapter/section/file) instead of one unit for the whole deliverable; this applies regardless of the goal's subject matter." + planUnitShapeRules
+	if hasPlan {
+		return "You are transcribing a mission plan. The goal below already contains the operator's own plan: convert it into an ordered list of verifiable units faithfully, preserving its steps and order. Do not redesign the plan, do not add scope or steps the operator didn't ask for, and do not merge or split steps the operator kept separate, except where the shape rules below force a split (one step whose own deliverable would truncate a single worker turn) or a merge (a small change inside one directory)." + rules
+	}
+	return "You are planning one mission. Break the goal into the SMALLEST ordered list of verifiable units that achieves it: one unit is correct for a simple goal; never pad the plan. A worker turn is one continuous model generation: if a single unit's own deliverable would demand a very long uninterrupted output (many chapters, dozens of sections, a large multi-file dataset, or similar), a long stream is more likely to truncate mid-generation, so split that unit along its own natural boundaries (one unit per chapter/section/file) instead of one unit for the whole deliverable; this applies regardless of the goal's subject matter." + rules
 }
 
 // PlanSession runs the planning turn that produces a Plan from the
@@ -2009,7 +2064,7 @@ func planSystemPrompt(hasPlan bool) string {
 // each retry since nothing told the model what went wrong).
 func (r *nativeRunner) PlanSession(ctx context.Context, m Mission, discoverNotes string) (Plan, error) {
 	skillsHint := r.skillsNudge(ctx, m)
-	system := planSystemPrompt(m.HasPlan) + r.execEnvironmentNote(ctx) + skillsHint + r.loadedSkillsForPlan(ctx, m, discoverNotes)
+	system := planSystemPrompt(m.HasPlan, bootstrapAllowed(m, discoverNotes)) + r.execEnvironmentNote(ctx) + skillsHint + r.loadedSkillsForPlan(ctx, m, discoverNotes)
 	user := "Goal: " + NeutralizeSlot(m.Goal)
 	if discoverNotes != "" {
 		user += "\n\nDiscovery findings:\n" + NeutralizeSlot(discoverNotes)
