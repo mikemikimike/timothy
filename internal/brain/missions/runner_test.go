@@ -2372,7 +2372,7 @@ type fakeEnvironmentSink struct {
 	calls []string
 }
 
-func (f *fakeEnvironmentSink) SetEnvironment(ctx context.Context, id, environment, marker string) error {
+func (f *fakeEnvironmentSink) SetEnvironment(ctx context.Context, id, environment, marker string, candidates []string, toolchains map[string]string) error {
 	f.calls = append(f.calls, id+":"+environment+":"+marker)
 	return nil
 }
@@ -2393,8 +2393,20 @@ func TestDiscoverSessionReportsEnvironment(t *testing.T) {
 			`{"findings":"docs only","environment":"base"}`, nil},
 		{"unknown key ignored", Mission{ID: "m1", Kind: KindCoding, Route: "default", Goal: "rust cli"},
 			`{"findings":"cargo project","environment":"rust"}`, nil},
-		{"already decided by markers", Mission{ID: "m1", Kind: KindCoding, Environment: "go", Route: "default", Goal: "x"},
+		{"operator-explicit value is kept", Mission{ID: "m1", Kind: KindCoding, Environment: "go", Route: "default", Goal: "x"},
 			`{"findings":"go module","environment":"node"}`, nil},
+		{"marker-detected value overridden when discover disagrees", Mission{ID: "m1", Kind: KindCoding, Environment: "node", EnvironmentMarker: "package.json", Route: "default", Goal: "x"},
+			`{"findings":"laravel app","environment":"php"}`, []string{"m1:php:discover"}},
+		{"marker-detected value kept when discover agrees", Mission{ID: "m1", Kind: KindCoding, Environment: "php", EnvironmentMarker: "composer.json", Route: "default", Goal: "x"},
+			`{"findings":"laravel app","environment":"php"}`, nil},
+		{"discover-set value is not overridden again", Mission{ID: "m1", Kind: KindCoding, Environment: "php", EnvironmentMarker: "discover", Route: "default", Goal: "x"},
+			`{"findings":"go module","environment":"go"}`, nil},
+		{"base does not override a marker", Mission{ID: "m1", Kind: KindCoding, Environment: "node", EnvironmentMarker: "package.json", Route: "default", Goal: "x"},
+			`{"findings":"docs","environment":"base"}`, nil},
+		{"empty report does not override a marker", Mission{ID: "m1", Kind: KindCoding, Environment: "node", EnvironmentMarker: "package.json", Route: "default", Goal: "x"},
+			`{"findings":"docs"}`, nil},
+		{"unregistered report does not override a marker", Mission{ID: "m1", Kind: KindCoding, Environment: "node", EnvironmentMarker: "package.json", Route: "default", Goal: "x"},
+			`{"findings":"cargo","environment":"rust"}`, nil},
 		{"general missions never set one", Mission{ID: "m1", Kind: "general", Route: "default", Goal: "x"},
 			`{"findings":"n/a","environment":"node"}`, nil},
 	}
@@ -2433,6 +2445,43 @@ func TestDiscoverSessionPrefixesUnsupportedStack(t *testing.T) {
 	}
 	if !strings.HasSuffix(notes, "Cargo.toml at the root") {
 		t.Fatalf("notes = %q, want the findings kept after the stack note", notes)
+	}
+}
+
+// TestDiscoverSessionDropsStackTheImageCovers: a stack naming the
+// mission's own image language gets no bootstrap note unless the
+// toolchain install failed (issue #992 E2E: "PHP 8.1 CLI" on php).
+func TestDiscoverSessionDropsStackTheImageCovers(t *testing.T) {
+	cases := []struct {
+		name     string
+		mission  Mission
+		args     string
+		wantNote bool
+	}{
+		{"php stack on php env", Mission{Environment: "php"}, `{"findings":"f","stack":"PHP 8.1 CLI script"}`, false},
+		{"laravel on php env after installed", Mission{Environment: "php", ToolchainInstall: "installed"}, `{"findings":"f","stack":"Laravel 10"}`, false},
+		{"stack matches the report's environment", Mission{}, `{"findings":"f","environment":"python","stack":"Django app"}`, false},
+		{"failed install keeps the note", Mission{Environment: "php", ToolchainInstall: "failed"}, `{"findings":"f","stack":"PHP 7.4"}`, true},
+		{"other language keeps the note", Mission{Environment: "php"}, `{"findings":"f","stack":"Rust CLI"}`, true},
+		{"django is not go", Mission{Environment: "go"}, `{"findings":"f","stack":"Django"}`, true},
+		{"markdown documentation needs no toolchain", Mission{}, `{"findings":"f","stack":"Markdown documentation"}`, false},
+		{"yaml config files need no toolchain", Mission{Environment: "base"}, `{"findings":"f","stack":"YAML config files"}`, false},
+		{"rust with markdown docs keeps the note", Mission{}, `{"findings":"f","stack":"Rust CLI with markdown docs"}`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := &scriptedAgent{batches: [][]stream.StreamEvent{{toolEndEvent(discoverNotesToolName, tc.args)}}}
+			r := newTestRunner(agent)
+			m := tc.mission
+			m.ID, m.Kind, m.Route, m.Goal = "m1", KindCoding, "default", "test"
+			notes, _, _, err := r.DiscoverSession(context.Background(), m)
+			if err != nil {
+				t.Fatalf("DiscoverSession: %v", err)
+			}
+			if got := strings.HasPrefix(notes, "Stack: "); got != tc.wantNote {
+				t.Fatalf("notes = %q, want stack note %v", notes, tc.wantNote)
+			}
+		})
 	}
 }
 

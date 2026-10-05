@@ -714,6 +714,9 @@ export interface PlanUnit {
   // evidence_only (D-123) marks a unit whose deliverable is a side
   // effect (e.g. a GitHub issue) rather than a file: no artifacts.
   evidence_only?: boolean
+  // bootstrap (D-124) marks the first unit that installs a missing
+  // toolchain into the workspace.
+  bootstrap?: boolean
   // criteria (D-095) are the unit's acceptance criteria, 2 to 6 short
   // lines the reviewer judges against; scope lists the paths the unit
   // may touch. Both absent on plans written before D-095.
@@ -886,6 +889,9 @@ export interface Mission {
   // time (explicit request > repo markers > goal keyword > base).
   // General missions never set this.
   environment?: string
+  // toolchains maps tool -> version prefix the repo's marker files pin
+  // (D-126); installed in the sandbox before discover.
+  toolchains?: Record<string, string>
   // harness is the delegated CLI executor this coding mission's worker
   // turns run under (D-051): "" or absent is native in-process
   // dispatch, "claude-cli"/"pi"/"codex-cli"/"opencode"/"cursor-cli" name
