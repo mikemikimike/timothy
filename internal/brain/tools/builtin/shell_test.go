@@ -251,3 +251,13 @@ func TestShellRunnerAllowsHigherMaxTimeoutThanChatDefault(t *testing.T) {
 		t.Fatalf("Runner received timeout %s, want the requested 600s (under the 15min MaxTimeout)", gotTimeout)
 	}
 }
+
+// D-128: shell output stays unfenced (Trusted) but still taints the
+// turn for memory writes (TaintsTurn).
+func TestShellIsTrustedButTaintsTurn(t *testing.T) {
+	t.Parallel()
+	tool := Shell(ShellConfig{})
+	if !tool.Trusted || !tool.TaintsTurn {
+		t.Fatalf("shell Trusted=%v TaintsTurn=%v, want both true", tool.Trusted, tool.TaintsTurn)
+	}
+}

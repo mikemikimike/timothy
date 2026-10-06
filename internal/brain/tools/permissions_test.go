@@ -436,3 +436,14 @@ func TestNoteToolExemption(t *testing.T) {
 		t.Fatal("write_note must not be exempt by name")
 	}
 }
+
+func TestRememberPermissionExemptionAllowsPendingReviewWrites(t *testing.T) {
+	t.Parallel()
+	p := NewPermissions(nil, "/workspace")
+	if !p.isExempt("remember") {
+		t.Fatal("remember should remain exempt because memoryd queues tainted writes")
+	}
+	if !p.isExempt("search_web") {
+		t.Fatal("search_web should remain exempt")
+	}
+}

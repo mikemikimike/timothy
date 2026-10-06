@@ -4,6 +4,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { MemoryItem } from '../api/types'
 import { Memory, KnowledgeRedirect } from './Memory'
 
+vi.mock('sonner', () => ({
+  toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
+}))
+
 vi.mock('../api/client', () => ({
   listMemories: vi.fn(),
   addMemory: vi.fn(),
@@ -39,7 +43,8 @@ vi.mock('echarts/components', () => ({
 }))
 vi.mock('echarts/renderers', () => ({ CanvasRenderer: {} }))
 
-import { entityGraph, listMemories, memoryChain, resolveMemory, searchMemories } from '../api/client'
+import { addMemory, entityGraph, listMemories, memoryChain, resolveMemory, searchMemories } from '../api/client'
+import { toast } from 'sonner'
 
 const pendingMemory: MemoryItem = {
   id: 'm1',
@@ -171,6 +176,31 @@ describe('Memory graph tab', () => {
 })
 
 describe('Memory browser', () => {
+  it('shows when a manual add needs review', async () => {
+    vi.mocked(addMemory).mockResolvedValue({ id: 'm2', status: 'pending' })
+    renderPage()
+    fireEvent.click(await screen.findByRole('radio', { name: 'Browser' }))
+    fireEvent.change(screen.getByTestId('manual-add'), { target: { value: 'User prefers dark mode.' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => {
+      expect(addMemory).toHaveBeenCalledWith('User prefers dark mode.', 'semantic')
+      expect(toast.info).toHaveBeenCalledWith('Memory added to the review queue')
+    })
+  })
+
+  it('shows when a manual add matches a rejected fact', async () => {
+    vi.mocked(addMemory).mockResolvedValue({ id: '', status: 'dropped' })
+    renderPage()
+    fireEvent.click(await screen.findByRole('radio', { name: 'Browser' }))
+    fireEvent.change(screen.getByTestId('manual-add'), { target: { value: 'User lives in Porto.' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => {
+      expect(toast.info).toHaveBeenCalledWith('Memory was not added because it matches a rejected fact')
+    })
+  })
+
   it('searches through the retrieval endpoint', async () => {
     vi.mocked(searchMemories).mockResolvedValue([
       { id: 'r1', type: 'semantic', content: 'User lives in Porto.', score: 0.02 },

@@ -50,11 +50,11 @@ const (
 	// the strict JSON contract more often than they meet it.
 	sideRoute = "summarize"
 
-	// nearDupSimilarity marks a candidate as restating known
+	// NearDupSimilarity marks a candidate as restating known
 	// knowledge; exactDupSimilarity (or byte-equal content) drops it
 	// outright. Near-dups still insert - the consolidation job merges
 	// them by the same similarity measure.
-	nearDupSimilarity  = 0.95
+	NearDupSimilarity  = 0.95
 	exactDupSimilarity = 0.99
 
 	// autoPromoteConfidence is the floor for episodic observations to
@@ -190,7 +190,7 @@ func (e *Extractor) Extract(ctx context.Context, req Request) ([]string, error) 
 			if err != nil {
 				return ids, fmt.Errorf("extract: dedup: %w", err)
 			}
-			if found && sim >= nearDupSimilarity {
+			if found && sim >= NearDupSimilarity {
 				if status == store.StatusRejected {
 					// The user already rejected this fact once; rejection
 					// is a durable teaching signal, so the candidate is
@@ -287,15 +287,15 @@ func (e *Extractor) proposeOnce(ctx context.Context, req Request) (string, error
 		sys = reflectionSystem
 	}
 	events, err := e.gw.Stream(ctx, gwclient.StreamRequest{
-		Route: route,
-		Purpose:      "memory-extract",
-		System:       sys,
-		Messages:     []provider.Message{{Role: "user", Content: req.Text}},
+		Route:    route,
+		Purpose:  "memory-extract",
+		System:   sys,
+		Messages: []provider.Message{{Role: "user", Content: req.Text}},
 		// Reasoning models spend thinking tokens from the same budget
 		// before emitting content; 1000 starved the JSON reply entirely
 		// (stream ended incomplete with zero content chunks).
-		MaxTokens:    4000,
-		SessionID:    req.SessionID,
+		MaxTokens: 4000,
+		SessionID: req.SessionID,
 	})
 	if err != nil {
 		return "", err
@@ -411,11 +411,17 @@ func boundedWindow(content string) bool {
 // fact for confirmation, a false negative activates an instruction
 // without review. Keyword matching can never be complete; the fence
 // (D-011 trust="data") is the containment for what slips through.
-var sensitive = regexp.MustCompile(`(?i)` +
-	`password|passphrase|token|secret|credential|api.?key|private.?key|ssh|vault|` +
+var sensitive = regexp.MustCompile(`(?i)` + credentialPattern + `|` +
 	`always |never |prefer|instruct|direct(ed|s|ive)|require|rule|policy|` +
 	`must |shall |should |do not |don't |ensure |make sure |` +
 	`from now on|going forward|all future`)
+
+// credentialPattern is the credentials-adjacent half of sensitive. A
+// clean, user-entered memory add is reviewed only on this half: the
+// user's own standing instruction is the point of "remember" (D-011).
+const credentialPattern = `password|passphrase|token|secret|credential|api.?key|private.?key|ssh|vault`
+
+var credential = regexp.MustCompile(`(?i)` + credentialPattern)
 
 // AutoPromote is the promotion policy - code, not LLM (D-011).
 // Episodic observations with high confidence activate directly;
@@ -430,6 +436,12 @@ func AutoPromote(f Fact) bool {
 		return false
 	}
 	return !sensitive.MatchString(f.Content)
+}
+
+// MentionsCredential reports whether content is credentials-adjacent,
+// which keeps even a clean user-entered memory in the review queue.
+func MentionsCredential(content string) bool {
+	return credential.MatchString(content)
 }
 
 // denyText collects the source-record lines a proposed fact must not
@@ -458,12 +470,12 @@ func denyText(req Request) []string {
 }
 
 // nearDupVector reports whether emb is a near-duplicate (by the same
-// nearDupSimilarity threshold as NearestActive) of any vector already
+// NearDupSimilarity threshold as NearestActive) of any vector already
 // accepted this run. Batch sizes are small (maxFacts), so a linear
 // scan needs no index.
 func nearDupVector(emb store.Vector, accepted []store.Vector) bool {
 	for _, other := range accepted {
-		if cosineSimilarity(emb, other) >= nearDupSimilarity {
+		if cosineSimilarity(emb, other) >= NearDupSimilarity {
 			return true
 		}
 	}

@@ -52,6 +52,10 @@ type Tool struct {
 	// documents, remote MCP output) leaves it unset. Set per tool in
 	// its constructor, never inferred from a name.
 	Trusted bool
+	// TaintsTurn marks a trusted tool whose output can still carry text
+	// an outside party wrote (shell running curl). The loop shows it
+	// unfenced but counts it as untrusted for memory writes (D-128).
+	TaintsTurn bool
 }
 
 // sessionIDKey carries the turn's session id to a tool's Execute. Set
@@ -71,4 +75,19 @@ func WithSessionID(ctx context.Context, sessionID string) context.Context {
 func SessionIDFromContext(ctx context.Context) string {
 	id, _ := ctx.Value(sessionIDKey{}).(string)
 	return id
+}
+
+type untrustedToolOutputSeenKey struct{}
+
+// WithUntrustedToolOutputSeen marks later tool calls in this turn as
+// having model-visible untrusted output in their context.
+func WithUntrustedToolOutputSeen(ctx context.Context) context.Context {
+	return context.WithValue(ctx, untrustedToolOutputSeenKey{}, true)
+}
+
+// UntrustedToolOutputSeen reports whether an earlier tool call in this
+// turn returned non-empty, untrusted content to the model.
+func UntrustedToolOutputSeen(ctx context.Context) bool {
+	seen, _ := ctx.Value(untrustedToolOutputSeenKey{}).(bool)
+	return seen
 }

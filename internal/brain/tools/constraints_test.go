@@ -390,3 +390,40 @@ func TestValidatedRejectsBrokenSchema(t *testing.T) {
 		t.Fatal("a malformed schema must be reported, not silently accepted")
 	}
 }
+
+func TestConstrainedTaints(t *testing.T) {
+	t.Parallel()
+	r := NewRegistry()
+	schema := json.RawMessage(`{"type":"object"}`)
+	noop := func(context.Context, json.RawMessage) (string, error) { return "", nil }
+	for _, tool := range []*Tool{
+		{Name: "fetch", Description: "untrusted", InputSchema: schema, Execute: noop},
+		{Name: "calc", Description: "trusted", InputSchema: schema, Execute: noop, Trusted: true},
+		{Name: "sh", Description: "trusted, taints", InputSchema: schema, Execute: noop, Trusted: true, TaintsTurn: true},
+	} {
+		if err := r.Register(tool); err != nil {
+			t.Fatalf("register %s: %v", tool.Name, err)
+		}
+	}
+	c, err := NewConstrained(r, testToolCalls())
+	if err != nil {
+		t.Fatalf("NewConstrained: %v", err)
+	}
+	tests := []struct {
+		name           string
+		trusted, taint bool
+	}{
+		{"fetch", false, true},
+		{"calc", true, false},
+		{"sh", true, true},
+		{"unknown", false, true},
+	}
+	for _, tc := range tests {
+		if got := c.Trusted(tc.name); got != tc.trusted {
+			t.Errorf("Trusted(%q) = %v, want %v", tc.name, got, tc.trusted)
+		}
+		if got := c.Taints(tc.name); got != tc.taint {
+			t.Errorf("Taints(%q) = %v, want %v", tc.name, got, tc.taint)
+		}
+	}
+}

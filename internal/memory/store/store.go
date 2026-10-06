@@ -37,18 +37,14 @@ const memoryColumns = `id, type, content, entity_refs, ` +
 	`status, COALESCE(confidence, 0), retrieval_hits`
 
 // Insert stores a new memory and returns its id. Status is derived,
-// not caller-chosen: user-explicit memories activate immediately,
-// everything else lands pending for the promotion policy or the
-// confirmation queue. Embedding may be empty (backfilled by
-// extraction).
+// not caller-chosen: user-explicit memories activate immediately
+// unless policy requires review; everything else lands pending.
+// Embedding may be empty (backfilled by extraction).
 func (s *Store) Insert(ctx context.Context, m Memory) (string, error) {
+	status := initialStatus(m)
 	db, err := s.db.Get()
 	if err != nil {
 		return "", fmt.Errorf("insert memory: %w", err)
-	}
-	status := StatusPending
-	if m.Actor == ActorUser {
-		status = StatusActive
 	}
 	var id string
 	err = db.QueryRow(ctx, `INSERT INTO memories
@@ -61,6 +57,13 @@ func (s *Store) Insert(ctx context.Context, m Memory) (string, error) {
 		return "", fmt.Errorf("insert memory: %w", err)
 	}
 	return id, nil
+}
+
+func initialStatus(m Memory) Status {
+	if m.Actor == ActorUser && !m.RequireReview {
+		return StatusActive
+	}
+	return StatusPending
 }
 
 // Promote moves a pending memory to active.

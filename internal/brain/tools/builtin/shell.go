@@ -87,8 +87,10 @@ func Shell(cfg ShellConfig) *tools.Tool {
 		Name: "shell",
 		// Trusted: command output is the workspace the model itself
 		// works in; fencing it would wrap every build log (D-109 keeps
-		// the line D-107 drew).
-		Trusted: true,
+		// the line D-107 drew). TaintsTurn: a command can still fetch
+		// outside text (curl), so later memory writes go to review (D-128).
+		Trusted:    true,
+		TaintsTurn: true,
 		Description: `Runs a shell command in the workspace directory.
 
 Use for file inspection, text processing, and running programs inside
