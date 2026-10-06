@@ -166,21 +166,49 @@ func TestAddWithoutTrustedSignalRequiresReview(t *testing.T) {
 	}
 }
 
-func TestAddSensitiveFactRequiresReview(t *testing.T) {
+func TestAddTrustedCredentialFactRequiresReview(t *testing.T) {
 	t.Parallel()
 	fm := newFakeManager()
 	req := httptest.NewRequest(http.MethodPost, "/v1/memories",
-		strings.NewReader(`{"content":"The user always wants weekly reports to be emailed.","trusted":true}`))
+		strings.NewReader(`{"content":"The staging API token is stored in the vault.","trusted":true}`))
 	rec := httptest.NewRecorder()
 	manageAPI(fm).handleAdd(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d body %s", rec.Code, rec.Body)
 	}
 	if len(fm.inserted) != 1 || !fm.inserted[0].RequireReview {
-		t.Fatalf("inserted = %+v, want sensitive memory held for review", fm.inserted)
+		t.Fatalf("inserted = %+v, want credential memory held for review", fm.inserted)
 	}
 	if !strings.Contains(rec.Body.String(), `"status":"pending"`) {
 		t.Fatalf("result = %s, want pending status", rec.Body)
+	}
+}
+
+// D-011: a clean, trusted add of the user's own standing instruction
+// activates; only credential phrasing holds it.
+func TestAddTrustedDirectiveFactActivates(t *testing.T) {
+	t.Parallel()
+	for _, content := range []string{
+		"Remember I prefer dark mode.",
+		"The user always wants weekly reports to be emailed.",
+	} {
+		t.Run(content, func(t *testing.T) {
+			t.Parallel()
+			fm := newFakeManager()
+			req := httptest.NewRequest(http.MethodPost, "/v1/memories",
+				strings.NewReader(`{"content":"`+content+`","trusted":true}`))
+			rec := httptest.NewRecorder()
+			manageAPI(fm).handleAdd(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d body %s", rec.Code, rec.Body)
+			}
+			if len(fm.inserted) != 1 || fm.inserted[0].RequireReview {
+				t.Fatalf("inserted = %+v, want active memory", fm.inserted)
+			}
+			if !strings.Contains(rec.Body.String(), `"status":"active"`) {
+				t.Fatalf("result = %s, want active status", rec.Body)
+			}
+		})
 	}
 }
 
@@ -213,7 +241,7 @@ func TestAddRejectedNearDuplicateFromUntrustedSourceIsDroppedAndLogged(t *testin
 	}
 }
 
-func TestAddTrustedRestatementOfRejectedFactIsDropped(t *testing.T) {
+func TestAddTrustedRestatementOfRejectedFactInsertsActive(t *testing.T) {
 	t.Parallel()
 	fm := newFakeManager()
 	fm.nearestID, fm.nearestSim, fm.nearestStatus, fm.nearestFound = "rejected-1", 0.95, store.StatusRejected, true
@@ -221,8 +249,27 @@ func TestAddTrustedRestatementOfRejectedFactIsDropped(t *testing.T) {
 		strings.NewReader(`{"content":"User lives in Porto.","trusted":true}`))
 	rec := httptest.NewRecorder()
 	manageAPI(fm).handleAdd(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body %s", rec.Code, rec.Body)
+	}
+	if len(fm.inserted) != 1 || fm.inserted[0].RequireReview {
+		t.Fatalf("inserted = %+v, want one active memory", fm.inserted)
+	}
+	if !strings.Contains(rec.Body.String(), `"status":"active"`) {
+		t.Fatalf("result = %s, want active status", rec.Body)
+	}
+}
+
+func TestAddTrustedCredentialRestatementOfRejectedFactIsDropped(t *testing.T) {
+	t.Parallel()
+	fm := newFakeManager()
+	fm.nearestID, fm.nearestSim, fm.nearestStatus, fm.nearestFound = "rejected-1", 0.95, store.StatusRejected, true
+	req := httptest.NewRequest(http.MethodPost, "/v1/memories",
+		strings.NewReader(`{"content":"The staging password is hunter2.","trusted":true}`))
+	rec := httptest.NewRecorder()
+	manageAPI(fm).handleAdd(rec, req)
 	if rec.Code != http.StatusOK || len(fm.inserted) != 0 {
-		t.Fatalf("status=%d inserted=%d body=%s, want trusted restatement dropped", rec.Code, len(fm.inserted), rec.Body)
+		t.Fatalf("status=%d inserted=%d body=%s, want dropped", rec.Code, len(fm.inserted), rec.Body)
 	}
 	if !strings.Contains(rec.Body.String(), `"status":"dropped"`) {
 		t.Fatalf("result=%s, want dropped status", rec.Body)

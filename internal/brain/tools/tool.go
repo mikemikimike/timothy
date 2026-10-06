@@ -52,6 +52,10 @@ type Tool struct {
 	// documents, remote MCP output) leaves it unset. Set per tool in
 	// its constructor, never inferred from a name.
 	Trusted bool
+	// TaintsTurn marks a trusted tool whose output can still carry text
+	// an outside party wrote (shell running curl). The loop shows it
+	// unfenced but counts it as untrusted for memory writes (D-128).
+	TaintsTurn bool
 }
 
 // sessionIDKey carries the turn's session id to a tool's Execute. Set

@@ -25,10 +25,13 @@ import (
 // Executor runs one constrained tool call; tools.Constrained
 // satisfies it. Trusted reports the tool's tools.Tool.Trusted mark,
 // which decides whether its result is fenced (D-109); an unknown name
-// is untrusted.
+// is untrusted. Taints reports whether a result counts as untrusted for
+// later memory writes, which also covers trusted tools marked
+// TaintsTurn (D-128).
 type Executor interface {
 	Execute(ctx context.Context, name string, args json.RawMessage) (string, error)
 	Trusted(name string) bool
+	Taints(name string) bool
 }
 
 // Permissioner resolves the permission chain; tools.Permissions
@@ -834,11 +837,12 @@ func (a *Agent) run(ctx context.Context, req Request, out chan<- stream.StreamEv
 			}
 			results[i].Content = capToolResult(results[i].Content, req.ToolResultCap)
 			results[i].Content = fenceUntrusted(calls[i].Name, trusted, results[i].Content, results[i].IsError)
-			if rawContent != "" && !exec.Trusted(calls[i].Name) {
+			tainted := rawContent != "" && (!trusted || exec.Taints(calls[i].Name))
+			if tainted {
 				untrustedToolOutputSeen = true
 			}
 			msgs = append(msgs, provider.Message{
-				Role: "tool", ToolResult: &results[i], Untrusted: rawContent != "" && !trusted,
+				Role: "tool", ToolResult: &results[i], Untrusted: tainted,
 			})
 		}
 
@@ -1035,7 +1039,7 @@ func (a *Agent) executeOne(ctx context.Context, exec Executor, sessionID, missio
 			content = offloaded
 		}
 	}
-	untrustedResult := content != "" && !exec.Trusted(call.Name)
+	untrustedResult := content != "" && exec.Taints(call.Name)
 
 	duration := time.Since(start)
 	// load_skill's result is the pack's full rule text, useful to the
@@ -1380,6 +1384,13 @@ func (e *extraExecutor) Trusted(name string) bool {
 		return t.Trusted
 	}
 	return e.base.Trusted(name)
+}
+
+func (e *extraExecutor) Taints(name string) bool {
+	if t, ok := e.extra[name]; ok {
+		return !t.Trusted || t.TaintsTurn
+	}
+	return e.base.Taints(name)
 }
 
 // withExtraTools wraps base so calls to req.ExtraTools resolve without

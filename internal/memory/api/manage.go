@@ -74,8 +74,9 @@ func (a *API) handleList(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"memories": out})
 }
 
-// handleAdd stores a user-explicit memory. Tainted or sensitive content
-// stays pending for review; clean explicit memories still activate.
+// handleAdd stores a user-explicit memory. Untrusted or
+// credentials-adjacent content stays pending for review; clean, trusted
+// memories activate (D-011).
 func (a *API) handleAdd(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Content string `json:"content"`
@@ -98,7 +99,7 @@ func (a *API) handleAdd(w http.ResponseWriter, r *http.Request) {
 	m := store.Memory{
 		Type: store.MemoryType(req.Type), Content: req.Content,
 		Actor: store.ActorUser, Confidence: 1,
-		RequireReview: !req.Trusted || extract.RequiresReview(req.Content),
+		RequireReview: !req.Trusted || extract.MentionsCredential(req.Content),
 	}
 	// Best-effort embedding: a memory without a vector still serves the
 	// text and entity legs, though similarity checks are unavailable.
@@ -119,6 +120,11 @@ func (a *API) handleAdd(w http.ResponseWriter, r *http.Request) {
 		if found && similarity >= extract.NearDupSimilarity {
 			switch status {
 			case store.StatusRejected:
+				// A clean, trusted restatement overrides the earlier
+				// rejection as a new active row; the rejected row stays.
+				if req.Trusted && !m.RequireReview {
+					break
+				}
 				a.log.Info("memory dropped as near-duplicate of rejected fact",
 					"of", dupID, "similarity", similarity)
 				writeAddResult(w, "", "dropped")

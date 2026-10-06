@@ -97,24 +97,48 @@ func TestAutoPromote(t *testing.T) {
 	}
 }
 
-func TestRequiresReview(t *testing.T) {
+func TestMentionsCredential(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		content string
 		want    bool
 	}{
-		{content: "The user always wants weekly reports emailed.", want: true},
 		{content: "The user's API token is stored in the vault.", want: true},
-		{content: "The user visited Lisbon on 2026-07-05.", want: false},
+		{content: "User's GitHub token is ghp_abc123", want: true},
+		{content: "User connects to the homelab over ssh as root", want: true},
+		{content: "The staging password rotates monthly.", want: true},
 		{content: "Remember I prefer dark mode.", want: false},
-		{content: "The rule is to keep deploy output concise.", want: true},
-		{content: "The user's authentication token is stored in the vault.", want: true},
+		{content: "The user always wants weekly reports emailed.", want: false},
+		{content: "The user visited Lisbon on 2026-07-05.", want: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.content, func(t *testing.T) {
 			t.Parallel()
-			if got := RequiresReview(tc.content); got != tc.want {
-				t.Fatalf("RequiresReview(%q) = %v, want %v", tc.content, got, tc.want)
+			if got := MentionsCredential(tc.content); got != tc.want {
+				t.Fatalf("MentionsCredential(%q) = %v, want %v", tc.content, got, tc.want)
+			}
+		})
+	}
+}
+
+// Regression: extraction keeps the broad gate, so credential and
+// directive phrasings never auto-promote however confident the fact.
+func TestAutoPromoteHoldsSensitiveEpisodicFacts(t *testing.T) {
+	t.Parallel()
+	for _, content := range []string{
+		"User's GitHub token is ghp_abc123",
+		"The deploy token for staging is xyz",
+		"User connects to the homelab over ssh as root",
+		"User always runs migrations on Fridays",
+		"Never deploy on Friday",
+		"User's company policy forbids weekend deploys",
+		"User prefers dark mode",
+		"The rule is to keep deploy output concise.",
+	} {
+		t.Run(content, func(t *testing.T) {
+			t.Parallel()
+			if AutoPromote(Fact{Type: "episodic", Content: content, Confidence: 0.99}) {
+				t.Fatalf("AutoPromote(%q) = true, want held for review", content)
 			}
 		})
 	}

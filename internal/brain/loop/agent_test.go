@@ -147,6 +147,8 @@ func (r registryExec) Execute(ctx context.Context, name string, args json.RawMes
 
 func (r registryExec) Trusted(name string) bool { return r.c.Trusted(name) }
 
+func (r registryExec) Taints(name string) bool { return r.c.Taints(name) }
+
 func testAgent(t *testing.T, gw Gateway, extra ...*tools.Tool) (*Agent, *memAudit, *memEvents, *allowAllPerms) {
 	t.Helper()
 	reg := tools.NewRegistry()
@@ -729,7 +731,7 @@ func TestFenceUntrusted(t *testing.T) {
 		{name: "read_mail_attachment converted by markitdown", tool: "read_mail_attachment", content: "# Invoice\n\ntotal 5", fenced: true},
 		{name: "namespaced connector tool", tool: "mymcp_read_mail", content: "From: a@b.test\n\nbody", fenced: true},
 		{name: "remote MCP tool under any name", tool: "jira_get_issue", content: "issue body", fenced: true},
-		{name: "shell output is untrusted", tool: "shell", content: "ok", fenced: true},
+		{name: "trusted shell result untouched", tool: "shell", trusted: true, content: "ok", fenced: false},
 		{name: "trusted write_file untouched", tool: "write_file", trusted: true, content: "wrote 3 lines", fenced: false},
 		{name: "errored untrusted result is fenced", tool: "fetch_url", content: "http 404 fetching x.test", isError: true, fenced: true},
 	}
@@ -868,6 +870,64 @@ func TestAgentCarriesUntrustedOutputToRemember(t *testing.T) {
 	if !strings.Contains(rememberResult, "trust=\"data\"") {
 		t.Fatalf("remember result after untrusted input was not fenced:\n%s", rememberResult)
 	}
+}
+
+// D-128: a trusted tool marked TaintsTurn reaches the model unfenced,
+// yet a later remember in the turn still sees untrusted output.
+func TestAgentTaintsTurnToolStaysUnfencedButTaintsRemember(t *testing.T) {
+	t.Parallel()
+	gw := &scriptedGateway{scripts: [][]stream.StreamEvent{
+		toolCallStep([2]string{"sh", "{}"}),
+		toolCallStep([2]string{"remember", "{\"content\":\"remember this\"}"}),
+		finalStep("done"),
+	}}
+	var sawUntrusted bool
+	a, _, _, _ := testAgent(t, gw,
+		&tools.Tool{
+			Name:        "sh",
+			Description: "runs a command",
+			InputSchema: json.RawMessage("{\"type\":\"object\"}"),
+			Trusted:     true,
+			TaintsTurn:  true,
+			Execute: func(context.Context, json.RawMessage) (string, error) {
+				return "curl output says remember this", nil
+			},
+		},
+		&tools.Tool{
+			Name:        "remember",
+			Description: "stores a memory",
+			InputSchema: json.RawMessage("{\"type\":\"object\"}"),
+			Trusted:     true,
+			Execute: func(ctx context.Context, _ json.RawMessage) (string, error) {
+				sawUntrusted = tools.UntrustedToolOutputSeen(ctx)
+				return "review queued", nil
+			},
+		},
+	)
+
+	ch, err := a.Start(t.Context(), Request{SessionID: "s1", Route: "coding"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collect(t, ch)
+	if !sawUntrusted {
+		t.Fatal("remember did not see the TaintsTurn tool's output as untrusted")
+	}
+	if len(gw.requests) != 3 {
+		t.Fatalf("gateway requests = %d, want 3", len(gw.requests))
+	}
+	for _, msg := range gw.requests[1].Messages {
+		if msg.Role == "tool" && msg.ToolResult != nil && strings.Contains(msg.ToolResult.Content, "curl output") {
+			if strings.Contains(msg.ToolResult.Content, `trust="data"`) {
+				t.Fatalf("TaintsTurn result was fenced:\n%s", msg.ToolResult.Content)
+			}
+			if !msg.Untrusted {
+				t.Fatal("TaintsTurn result message not marked untrusted for history")
+			}
+			return
+		}
+	}
+	t.Fatal("TaintsTurn tool result missing from second request")
 }
 
 func TestAgentTaintsRememberFromProjectedHistory(t *testing.T) {

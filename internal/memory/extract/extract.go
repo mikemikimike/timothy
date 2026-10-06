@@ -411,17 +411,17 @@ func boundedWindow(content string) bool {
 // fact for confirmation, a false negative activates an instruction
 // without review. Keyword matching can never be complete; the fence
 // (D-011 trust="data") is the containment for what slips through.
-var sensitive = regexp.MustCompile(`(?i)` +
-	`\b(password|passphrase|secret|credential|api[ -]?key|private[ -]?key|ssh key|access token|api token|auth(?:entication)? token|vault)\b|` +
-	`\b(always|never)\s+(?:wants?\b|use\b|send\b|share\b|store\b|delete\b|run\b|include\b|exclude\b|email\b|write\b|keep\b)|` +
-	`\b(instruct(ed|s|ion)?|direct(ed|s|ive)?|require(d|s|ment)?)\b|` +
-	`\b(?:the )?(?:rule|policy|instruction)\s+(?:is|says|requires|states)\b|` +
-	`\b(must|shall|should|ensure)\b|\bdo not\b|\bdon't\b|\bmake sure\b|` +
-	`\bfrom now on\b|\bgoing forward\b|\ball future\b`)
+var sensitive = regexp.MustCompile(`(?i)` + credentialPattern + `|` +
+	`always |never |prefer|instruct|direct(ed|s|ive)|require|rule|policy|` +
+	`must |shall |should |do not |don't |ensure |make sure |` +
+	`from now on|going forward|all future`)
 
-// Extraction stays conservative for preferences and rule-like facts even
-// though clean, user-entered memory adds may activate those values.
-var autoPromotionVeto = regexp.MustCompile(`(?i)\b(prefer|rule)\b`)
+// credentialPattern is the credentials-adjacent half of sensitive. A
+// clean, user-entered memory add is reviewed only on this half: the
+// user's own standing instruction is the point of "remember" (D-011).
+const credentialPattern = `password|passphrase|token|secret|credential|api.?key|private.?key|ssh|vault`
+
+var credential = regexp.MustCompile(`(?i)` + credentialPattern)
 
 // AutoPromote is the promotion policy - code, not LLM (D-011).
 // Episodic observations with high confidence activate directly;
@@ -435,13 +435,13 @@ func AutoPromote(f Fact) bool {
 	if f.Confidence < autoPromoteConfidence {
 		return false
 	}
-	return !RequiresReview(f.Content) && !autoPromotionVeto.MatchString(f.Content)
+	return !sensitive.MatchString(f.Content)
 }
 
-// RequiresReview reports whether content matches the conservative
-// directive or credential-sensitive gate used by memory promotion.
-func RequiresReview(content string) bool {
-	return sensitive.MatchString(content)
+// MentionsCredential reports whether content is credentials-adjacent,
+// which keeps even a clean user-entered memory in the review queue.
+func MentionsCredential(content string) bool {
+	return credential.MatchString(content)
 }
 
 // denyText collects the source-record lines a proposed fact must not
