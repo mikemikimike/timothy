@@ -38,18 +38,14 @@ const memoryColumns = `id, type, content, entity_refs, ` +
 	`status, COALESCE(confidence, 0), retrieval_hits`
 
 // Insert stores a new memory and returns its id. Status is derived,
-// not caller-chosen: user-explicit memories activate immediately,
-// everything else lands pending for the promotion policy or the
-// confirmation queue. Embedding may be empty (backfilled by
-// extraction).
+// not caller-chosen: user-explicit memories activate immediately
+// unless policy requires review; everything else lands pending.
+// Embedding may be empty (backfilled by extraction).
 func (s *Store) Insert(ctx context.Context, m Memory) (string, error) {
+	status := initialStatus(m)
 	db, err := s.db.Get()
 	if err != nil {
 		return "", fmt.Errorf("insert memory: %w", err)
-	}
-	status := StatusPending
-	if m.Actor == ActorUser {
-		status = StatusActive
 	}
 	var id string
 	err = db.QueryRow(ctx, `INSERT INTO memories
@@ -62,6 +58,13 @@ func (s *Store) Insert(ctx context.Context, m Memory) (string, error) {
 		return "", fmt.Errorf("insert memory: %w", err)
 	}
 	return id, nil
+}
+
+func initialStatus(m Memory) Status {
+	if m.Actor == ActorUser && !m.RequireReview {
+		return StatusActive
+	}
+	return StatusPending
 }
 
 // Promote moves a pending memory to active.
@@ -96,18 +99,11 @@ func (s *Store) ConfirmSuperseding(ctx context.Context, id string) error {
 		return fmt.Errorf("confirm superseding %s: %w", id, ErrNotFound)
 	}
 
-	tag, err := tx.Exec(ctx, `UPDATE memories
-		SET superseded_by = $2, status = $3
-		WHERE id = $1 AND status = $4 AND superseded_by IS NULL`,
-		oldID, id, StatusArchived, StatusActive)
-	if err != nil {
+	if err := retireHead(ctx, tx, oldID, id); err != nil {
 		return fmt.Errorf("confirm superseding old memory %s: %w", oldID, err)
 	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("confirm superseding old memory %s: %w", oldID, ErrNotFound)
-	}
 
-	tag, err = tx.Exec(ctx, `UPDATE memories
+	tag, err := tx.Exec(ctx, `UPDATE memories
 		SET status = $2, last_confirmed_at = now()
 		WHERE id = $1 AND status = $3 AND supersedes = $4`,
 		id, StatusActive, StatusPending, oldID)
@@ -149,15 +145,8 @@ func (s *Store) CorrectSuperseding(ctx context.Context, id string, m Memory) (st
 		return "", fmt.Errorf("correct superseding %s: %w", id, ErrNotFound)
 	}
 
-	tag, err := tx.Exec(ctx, `UPDATE memories
-		SET superseded_by = $2, status = $3
-		WHERE id = $1 AND status = $4 AND superseded_by IS NULL`,
-		oldID, id, StatusArchived, StatusActive)
-	if err != nil {
+	if err := retireHead(ctx, tx, oldID, id); err != nil {
 		return "", fmt.Errorf("correct superseding old memory %s: %w", oldID, err)
-	}
-	if tag.RowsAffected() == 0 {
-		return "", fmt.Errorf("correct superseding old memory %s: %w", oldID, ErrNotFound)
 	}
 
 	var newID string
@@ -171,7 +160,7 @@ func (s *Store) CorrectSuperseding(ctx context.Context, id string, m Memory) (st
 		return "", fmt.Errorf("insert corrected memory: %w", err)
 	}
 
-	tag, err = tx.Exec(ctx, `UPDATE memories
+	tag, err := tx.Exec(ctx, `UPDATE memories
 		SET superseded_by = $2, status = $3
 		WHERE id = $1 AND status = $4 AND supersedes = $5`,
 		id, newID, StatusArchived, StatusPending, oldID)
@@ -185,6 +174,38 @@ func (s *Store) CorrectSuperseding(ctx context.Context, id string, m Memory) (st
 		return "", fmt.Errorf("correct superseding memory commit: %w", err)
 	}
 	return newID, nil
+}
+
+// retireHead archives the live end of oldID's supersede chain in favor
+// of newID. When an earlier correction already replaced oldID, the chain
+// is followed to the row that replaced it; when nothing in the chain is
+// still active, there is nothing to retire and the correction simply
+// activates.
+func retireHead(ctx context.Context, tx pgx.Tx, oldID, newID string) error {
+	seen := map[string]bool{}
+	for id := oldID; id != "" && !seen[id]; {
+		seen[id] = true
+		var status Status
+		var next string
+		err := tx.QueryRow(ctx, `SELECT status, COALESCE(superseded_by::text, '')
+			FROM memories WHERE id = $1 FOR UPDATE`, id).Scan(&status, &next)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if status == StatusActive {
+			_, err := tx.Exec(ctx, `UPDATE memories SET superseded_by = $2, status = $3
+				WHERE id = $1 AND status = $4`, id, newID, StatusArchived, StatusActive)
+			return err
+		}
+		if next == newID {
+			return nil
+		}
+		id = next
+	}
+	return nil
 }
 
 // Reject marks a pending memory rejected; it will never be retrieved.
@@ -227,10 +248,55 @@ func (s *Store) Get(ctx context.Context, id string) (Memory, error) {
 	}
 	row := db.QueryRow(ctx, `SELECT `+memoryColumns+` FROM memories WHERE id = $1`, id)
 	m, err := scanMemory(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Memory{}, fmt.Errorf("get memory %s: %w", id, ErrNotFound)
+	}
 	if err != nil {
 		return Memory{}, fmt.Errorf("get memory %s: %w", id, err)
 	}
 	return m, nil
+}
+
+// Contents returns the content of each id that exists, keyed by id, in
+// one query (the review queue's supersede comparison).
+func (s *Store) Contents(ctx context.Context, ids []string) (map[string]string, error) {
+	out := map[string]string{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	db, err := s.db.Get()
+	if err != nil {
+		return nil, fmt.Errorf("memory contents: %w", err)
+	}
+	rows, err := db.Query(ctx, `SELECT id::text, content FROM memories WHERE id = ANY($1::uuid[])`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("memory contents: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, content string
+		if err := rows.Scan(&id, &content); err != nil {
+			return nil, fmt.Errorf("memory contents: %w", err)
+		}
+		out[id] = content
+	}
+	return out, rows.Err()
+}
+
+// HasPendingCorrection reports whether a pending row already proposes
+// to supersede id.
+func (s *Store) HasPendingCorrection(ctx context.Context, id string) (bool, error) {
+	db, err := s.db.Get()
+	if err != nil {
+		return false, fmt.Errorf("pending correction: %w", err)
+	}
+	var open bool
+	err = db.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM memories WHERE supersedes = $1 AND status = $2)`,
+		id, StatusPending).Scan(&open)
+	if err != nil {
+		return false, fmt.Errorf("pending correction: %w", err)
+	}
+	return open, nil
 }
 
 // ListByStatus returns memories in a lifecycle stage, optionally

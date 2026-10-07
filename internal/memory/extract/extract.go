@@ -32,6 +32,7 @@ type Gateway interface {
 type Storer interface {
 	Insert(ctx context.Context, m store.Memory) (string, error)
 	Get(ctx context.Context, id string) (store.Memory, error)
+	HasPendingCorrection(ctx context.Context, id string) (bool, error)
 	Promote(ctx context.Context, id string) error
 	Confirm(ctx context.Context, id string) error
 	UpsertEntity(ctx context.Context, typ, name string) (string, error)
@@ -52,9 +53,9 @@ const (
 	// the strict JSON contract more often than they meet it.
 	sideRoute = "summarize"
 
-	// nearDupSimilarity marks a candidate as a possible correction when
+	// NearDupSimilarity marks a candidate as a possible correction when
 	// its content differs from the closest known memory.
-	nearDupSimilarity = 0.95
+	NearDupSimilarity = 0.95
 
 	// autoPromoteConfidence is the floor for episodic observations to
 	// skip the confirmation queue.
@@ -108,6 +109,11 @@ type Request struct {
 	// otherwise re-extracts as if it were a discovered fact about the
 	// user.
 	Deny []string `json:"deny,omitempty"`
+	// Recalled lists the memory contents injected into the source turn.
+	// A fact restating one is the assistant echoing it back, so it is
+	// neither stored nor counted as a confirmation; a correction of one
+	// still goes through.
+	Recalled []string `json:"recalled,omitempty"`
 }
 
 // Extractor runs the pipeline.
@@ -166,6 +172,10 @@ func (e *Extractor) Extract(ctx context.Context, req Request) ([]string, error) 
 			e.log.Info("memory dropped as source-header echo", "session_id", req.SessionID)
 			continue
 		}
+		if echoesRecalled(f.Content, req.Recalled) {
+			e.log.Info("memory dropped as echo of a recalled memory", "session_id", req.SessionID)
+			continue
+		}
 		if f.Type != string(store.TypeEpisodic) && boundedWindow(f.Content) {
 			// A semantic or procedural fact phrased as a bounded
 			// observation window ("last 24 hours", "currently") describes
@@ -189,44 +199,58 @@ func (e *Extractor) Extract(ctx context.Context, req Request) ([]string, error) 
 
 		supersedes := ""
 		if len(emb) > 0 {
-			dupID, sim, found, err := e.store.NearestActiveOnly(ctx, emb)
+			activeID, sim, found, err := e.store.NearestActiveOnly(ctx, emb)
 			if err != nil {
 				return ids, fmt.Errorf("extract: active dedup: %w", err)
 			}
-			if found && sim >= nearDupSimilarity {
-				dup, err := e.store.Get(ctx, dupID)
+			if found && sim >= NearDupSimilarity {
+				active, err := e.store.Get(ctx, activeID)
 				if err != nil {
 					return ids, fmt.Errorf("extract: load duplicate: %w", err)
 				}
-				exact := normalizeContent(dup.Content) == normalizeContent(f.Content)
-				if exact {
-					if err := e.store.Confirm(ctx, dupID); err != nil {
-						e.log.Warn("confirm on duplicate failed; fact still dropped", "of", dupID, "error", err)
+				if !IsCorrection(f.Content, active.Content) {
+					// A restatement reinforces the existing row instead of
+					// inserting: repetition is a confidence signal, not new
+					// knowledge.
+					if err := e.store.Confirm(ctx, activeID); err != nil {
+						e.log.Warn("confirm on duplicate failed; fact still dropped", "of", activeID, "error", err)
 					}
-					e.log.Info("memory exact duplicate reinforced existing row",
-						"of", dupID, "similarity", sim, "session_id", req.SessionID)
+					e.log.Info("memory duplicate reinforced existing row",
+						"of", activeID, "similarity", sim, "session_id", req.SessionID)
 					continue
 				}
-				supersedes = dupID
+				// One open correction per fact: later turns repeating the
+				// change must not stack more cards on the queue.
+				open, err := e.store.HasPendingCorrection(ctx, activeID)
+				if err != nil {
+					return ids, fmt.Errorf("extract: pending correction: %w", err)
+				}
+				if open {
+					e.log.Info("memory correction already pending; skipped",
+						"of", activeID, "session_id", req.SessionID)
+					continue
+				}
+				supersedes = activeID
 			} else {
-				// Preserve pending/rejected suppression for exact re-proposals,
-				// while letting different content reach review even when its
-				// embedding is close to an unconfirmed or rejected fact.
 				dupID, sim, status, found, err := e.store.NearestActive(ctx, emb)
 				if err != nil {
 					return ids, fmt.Errorf("extract: dedup: %w", err)
 				}
-				if found && sim >= nearDupSimilarity && status != store.StatusActive {
+				if found && sim >= NearDupSimilarity && status != store.StatusActive {
 					dup, err := e.store.Get(ctx, dupID)
 					if err != nil {
 						return ids, fmt.Errorf("extract: load duplicate: %w", err)
 					}
-					if normalizeContent(dup.Content) == normalizeContent(f.Content) {
+					// A different fact that only embeds close to an
+					// unconfirmed or rejected one still reaches review.
+					if !IsCorrection(f.Content, dup.Content) {
 						if status == store.StatusRejected {
-							e.log.Info("memory dropped as exact duplicate of rejected fact",
+							// Rejection is a durable teaching signal: a
+							// reworded re-proposal is dropped, never re-queued.
+							e.log.Info("memory dropped as near-duplicate of rejected fact",
 								"of", dupID, "similarity", sim, "session_id", req.SessionID)
 						} else {
-							e.log.Info("memory exact duplicate matched pending row; skipped",
+							e.log.Info("memory duplicate matched pending row; skipped",
 								"of", dupID, "similarity", sim, "session_id", req.SessionID)
 						}
 						continue
@@ -427,11 +451,17 @@ func boundedWindow(content string) bool {
 // fact for confirmation, a false negative activates an instruction
 // without review. Keyword matching can never be complete; the fence
 // (D-011 trust="data") is the containment for what slips through.
-var sensitive = regexp.MustCompile(`(?i)` +
-	`password|passphrase|token|secret|credential|api.?key|private.?key|ssh|vault|` +
+var sensitive = regexp.MustCompile(`(?i)` + credentialPattern + `|` +
 	`always |never |prefer|instruct|direct(ed|s|ive)|require|rule|policy|` +
 	`must |shall |should |do not |don't |ensure |make sure |` +
 	`from now on|going forward|all future`)
+
+// credentialPattern is the credentials-adjacent half of sensitive. A
+// clean, user-entered memory add is reviewed only on this half: the
+// user's own standing instruction is the point of "remember" (D-011).
+const credentialPattern = `password|passphrase|token|secret|credential|api.?key|private.?key|ssh|vault`
+
+var credential = regexp.MustCompile(`(?i)` + credentialPattern)
 
 // AutoPromote is the promotion policy - code, not LLM (D-011).
 // Episodic observations with high confidence activate directly;
@@ -446,6 +476,12 @@ func AutoPromote(f Fact) bool {
 		return false
 	}
 	return !sensitive.MatchString(f.Content)
+}
+
+// MentionsCredential reports whether content is credentials-adjacent,
+// which keeps even a clean user-entered memory in the review queue.
+func MentionsCredential(content string) bool {
+	return credential.MatchString(content)
 }
 
 // denyText collects the source-record lines a proposed fact must not
@@ -479,18 +515,59 @@ type batchMemory struct {
 }
 
 // nearDupVector suppresses restatements within one model response, but
-// keeps an explicit change in negation polarity for user review.
+// keeps an explicit change in negation polarity for user review. One
+// response does not swap its own facts, so a word swap here is a
+// paraphrase, not a correction.
 func nearDupVector(emb store.Vector, content string, accepted []batchMemory) bool {
 	for _, other := range accepted {
-		if cosineSimilarity(emb, other.embedding) >= nearDupSimilarity && !oppositeNegation(content, other.content) {
+		if cosineSimilarity(emb, other.embedding) >= NearDupSimilarity && !oppositeNegation(content, other.content) {
 			return true
 		}
 	}
 	return false
 }
 
-func normalizeContent(content string) string {
-	return strings.Join(strings.Fields(content), " ")
+// IsCorrection reports whether next changes the fact prev states rather
+// than restating it: a negation flip, or a meaningful word swapped for
+// another (a city, number or name). Rewording that only adds or drops
+// words, punctuation or stopwords is a restatement.
+func IsCorrection(next, prev string) bool {
+	if oppositeNegation(next, prev) {
+		return true
+	}
+	a, b := meaningfulWords(next), meaningfulWords(prev)
+	return hasWordNotIn(a, b) && hasWordNotIn(b, a)
+}
+
+func meaningfulWords(content string) map[string]bool {
+	words := map[string]bool{}
+	for _, w := range strings.Fields(strings.ToLower(content)) {
+		w = strings.TrimSuffix(strings.Trim(w, ".,;:'\"()!?"), "'s")
+		if meaningfulDenyWord(w) {
+			words[w] = true
+		}
+	}
+	return words
+}
+
+func hasWordNotIn(a, b map[string]bool) bool {
+	for w := range a {
+		if !b[w] {
+			return true
+		}
+	}
+	return false
+}
+
+// echoesRecalled reports whether content restates a memory injected
+// into the source turn without correcting it.
+func echoesRecalled(content string, recalled []string) bool {
+	for _, r := range recalled {
+		if !IsCorrection(content, r) && echoesDeny(content, []string{r}) {
+			return true
+		}
+	}
+	return false
 }
 
 func oppositeNegation(a, b string) bool {

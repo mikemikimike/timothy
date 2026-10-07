@@ -194,6 +194,21 @@ func TestInsertStagesAgentWrites(t *testing.T) {
 	if ugot.Status != StatusActive {
 		t.Fatalf("user-explicit status = %s, want active", ugot.Status)
 	}
+
+	reviewRequired := mem("tainted remember content")
+	reviewRequired.Actor = ActorUser
+	reviewRequired.RequireReview = true
+	rid, err := s.Insert(ctx, reviewRequired)
+	if err != nil {
+		t.Fatalf("Insert review-required user memory: %v", err)
+	}
+	rgot, err := s.Get(ctx, rid)
+	if err != nil {
+		t.Fatalf("Get review-required memory: %v", err)
+	}
+	if rgot.Status != StatusPending {
+		t.Fatalf("review-required user status = %s, want pending", rgot.Status)
+	}
 }
 
 func TestInsertStoresEmbedding(t *testing.T) {
@@ -397,7 +412,10 @@ func TestConfirmSupersedingActivatesAndArchivesAtomically(t *testing.T) {
 	}
 }
 
-func TestConfirmSupersedingStaleOldRollsBack(t *testing.T) {
+// Review point: when an earlier correction already replaced the old
+// row, confirming a second one follows the chain and retires the row
+// that is live now instead of failing with 404.
+func TestConfirmSupersedingFollowsChainToLiveRow(t *testing.T) {
 	s := testStore(t)
 	ctx := t.Context()
 
@@ -423,15 +441,89 @@ func TestConfirmSupersedingStaleOldRollsBack(t *testing.T) {
 		t.Fatalf("Supersede old: %v", err)
 	}
 
-	if err := s.ConfirmSuperseding(ctx, proposalID); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("ConfirmSuperseding err = %v, want ErrNotFound", err)
+	if err := s.ConfirmSuperseding(ctx, proposalID); err != nil {
+		t.Fatalf("ConfirmSuperseding: %v", err)
+	}
+	gotOther, err := s.Get(ctx, otherID)
+	if err != nil {
+		t.Fatalf("Get other: %v", err)
 	}
 	gotProposal, err := s.Get(ctx, proposalID)
 	if err != nil {
 		t.Fatalf("Get proposal: %v", err)
 	}
-	if gotProposal.Status != StatusPending || gotProposal.SupersededBy != "" {
-		t.Fatalf("proposal = %+v, want unchanged pending row", gotProposal)
+	if gotOther.Status != StatusArchived || gotOther.SupersededBy != proposalID {
+		t.Fatalf("live row = %+v, want archived -> %s", gotOther, proposalID)
+	}
+	if gotProposal.Status != StatusActive {
+		t.Fatalf("proposal = %+v, want active", gotProposal)
+	}
+}
+
+func TestConfirmSupersedingWithNoLiveRowActivates(t *testing.T) {
+	s := testStore(t)
+	ctx := t.Context()
+
+	oldID, err := s.Insert(ctx, mem("pending fact the user then rejected"))
+	if err != nil {
+		t.Fatalf("Insert old: %v", err)
+	}
+	if err := s.Reject(ctx, oldID); err != nil {
+		t.Fatalf("Reject old: %v", err)
+	}
+	proposal := mem("correction of the rejected fact")
+	proposal.Supersedes = oldID
+	proposalID, err := s.Insert(ctx, proposal)
+	if err != nil {
+		t.Fatalf("Insert proposal: %v", err)
+	}
+	if err := s.ConfirmSuperseding(ctx, proposalID); err != nil {
+		t.Fatalf("ConfirmSuperseding: %v", err)
+	}
+	gotOld, _ := s.Get(ctx, oldID)
+	gotProposal, _ := s.Get(ctx, proposalID)
+	if gotOld.Status != StatusRejected || gotProposal.Status != StatusActive {
+		t.Fatalf("old=%s proposal=%s, want rejected and active", gotOld.Status, gotProposal.Status)
+	}
+}
+
+func TestGetUnknownIsNotFound(t *testing.T) {
+	s := testStore(t)
+	if _, err := s.Get(t.Context(), "00000000-0000-0000-0000-000000000001"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Get unknown err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestHasPendingCorrectionAndContents(t *testing.T) {
+	s := testStore(t)
+	ctx := t.Context()
+
+	old := mem("active fact with an open correction")
+	old.Actor = ActorUser
+	oldID, err := s.Insert(ctx, old)
+	if err != nil {
+		t.Fatalf("Insert old: %v", err)
+	}
+	open, err := s.HasPendingCorrection(ctx, oldID)
+	if err != nil || open {
+		t.Fatalf("HasPendingCorrection before = %v, %v; want false", open, err)
+	}
+	proposal := mem("the open correction")
+	proposal.Supersedes = oldID
+	if _, err := s.Insert(ctx, proposal); err != nil {
+		t.Fatalf("Insert proposal: %v", err)
+	}
+	open, err = s.HasPendingCorrection(ctx, oldID)
+	if err != nil || !open {
+		t.Fatalf("HasPendingCorrection after = %v, %v; want true", open, err)
+	}
+
+	contents, err := s.Contents(ctx, []string{oldID, "00000000-0000-0000-0000-000000000002"})
+	if err != nil {
+		t.Fatalf("Contents: %v", err)
+	}
+	if len(contents) != 1 || contents[oldID] != old.Content {
+		t.Fatalf("Contents = %v, want only the existing row", contents)
 	}
 }
 

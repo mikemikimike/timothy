@@ -200,6 +200,7 @@ func (c *Compactor) MaybeCompact(ctx context.Context, sessionID string) error {
 		Summary:            summary,
 		ReplacesThroughSeq: boundary,
 		FactsExtracted:     facts,
+		Untrusted:          messagesContainUntrusted(toSummarize),
 	}); err != nil {
 		return err
 	}
@@ -208,6 +209,15 @@ func (c *Compactor) MaybeCompact(ctx context.Context, sessionID string) error {
 	}
 	c.logger.Info("session compacted", "session_id", sessionID, "through_seq", boundary, "tokens_before", tokens)
 	return nil
+}
+
+func messagesContainUntrusted(messages []provider.Message) bool {
+	for _, message := range messages {
+		if message.Untrusted {
+			return true
+		}
+	}
+	return false
 }
 
 // planCompaction picks the summarization boundary: the oldest half of

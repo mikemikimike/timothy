@@ -29,8 +29,8 @@ const interruptedNote = "\n[this response was interrupted mid-stream; continue f
 //     pending — the question after an interruption must still see the
 //     partial. Older pendings (periodic checkpoints) are superseded by
 //     newer ones.
-//   - tool_execution events never enter the LLM context (turn memory
-//     carries their residue).
+//   - tool_execution events never enter the LLM context; their trust
+//     metadata taints the projected history for later memory writes.
 //
 // The projection is prefix-stable: appending events never rewrites
 // earlier messages — the prefix changes only when a compaction event
@@ -41,9 +41,14 @@ const interruptedNote = "\n[this response was interrupted mid-stream; continue f
 // reacts to it instead.
 func LLMContext(events []Event, budget int) ([]provider.Message, error) {
 	_ = budget // enforced by the compactor, not the projection
+	historyUntrusted, err := eventsContainUntrusted(events)
+	if err != nil {
+		return nil, err
+	}
 
 	// Find the latest compaction: its summary replaces the prefix.
 	var summary string
+	var summaryUntrusted bool
 	var replacedThrough int64 = -1
 	for _, ev := range events {
 		if ev.Kind == KindCompactionApplied {
@@ -52,6 +57,7 @@ func LLMContext(events []Event, budget int) ([]provider.Message, error) {
 				return nil, err
 			}
 			summary = c.Summary
+			summaryUntrusted = c.Untrusted
 			replacedThrough = c.ReplacesThroughSeq
 		}
 	}
@@ -60,7 +66,7 @@ func LLMContext(events []Event, budget int) ([]provider.Message, error) {
 
 	var msgs []provider.Message
 	if summary != "" {
-		msgs = append(msgs, provider.Message{Role: "user", Content: summaryPrefix + summary})
+		msgs = append(msgs, provider.Message{Role: "user", Content: summaryPrefix + summary, Untrusted: summaryUntrusted})
 	}
 
 	for _, ev := range events {
@@ -74,6 +80,7 @@ func LLMContext(events []Event, budget int) ([]provider.Message, error) {
 				return nil, err
 			}
 			msg := provider.Message{Role: "user", Content: m.Text}
+			msg.Untrusted = len(m.Images) > 0 || len(m.Documents) > 0
 			// Refs only, no bytes (D-045): chat.runTurn resolves these
 			// into Images just before the gateway call. Projection stays
 			// store-free.
@@ -147,7 +154,44 @@ func LLMContext(events []Event, budget int) ([]provider.Message, error) {
 			msgs = append(msgs, provider.Message{Role: "user", Content: fmt.Sprintf("[previous turn failed: %s]", f.Message)})
 		}
 	}
+	if historyUntrusted {
+		for i := range msgs {
+			msgs[i].Untrusted = true
+		}
+	}
 	return msgs, nil
+}
+
+func eventsContainUntrusted(events []Event) (bool, error) {
+	for _, ev := range events {
+		switch ev.Kind {
+		case KindUserMessage:
+			var message UserMessage
+			if err := decode(ev, &message); err != nil {
+				return false, err
+			}
+			if len(message.Images) > 0 || len(message.Documents) > 0 {
+				return true, nil
+			}
+		case KindToolExecution:
+			var execution ToolExecution
+			if err := decode(ev, &execution); err != nil {
+				return false, err
+			}
+			if execution.Untrusted || (!execution.TrustKnown && execution.ResultDigest != "") {
+				return true, nil
+			}
+		case KindCompactionApplied:
+			var compacted CompactionApplied
+			if err := decode(ev, &compacted); err != nil {
+				return false, err
+			}
+			if compacted.Untrusted {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 // livePendingSeq returns the seq of the pending_state still in play:

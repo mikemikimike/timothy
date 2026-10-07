@@ -97,6 +97,53 @@ func TestAutoPromote(t *testing.T) {
 	}
 }
 
+func TestMentionsCredential(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		content string
+		want    bool
+	}{
+		{content: "The user's API token is stored in the vault.", want: true},
+		{content: "User's GitHub token is ghp_abc123", want: true},
+		{content: "User connects to the homelab over ssh as root", want: true},
+		{content: "The staging password rotates monthly.", want: true},
+		{content: "Remember I prefer dark mode.", want: false},
+		{content: "The user always wants weekly reports emailed.", want: false},
+		{content: "The user visited Lisbon on 2026-07-05.", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.content, func(t *testing.T) {
+			t.Parallel()
+			if got := MentionsCredential(tc.content); got != tc.want {
+				t.Fatalf("MentionsCredential(%q) = %v, want %v", tc.content, got, tc.want)
+			}
+		})
+	}
+}
+
+// Regression: extraction keeps the broad gate, so credential and
+// directive phrasings never auto-promote however confident the fact.
+func TestAutoPromoteHoldsSensitiveEpisodicFacts(t *testing.T) {
+	t.Parallel()
+	for _, content := range []string{
+		"User's GitHub token is ghp_abc123",
+		"The deploy token for staging is xyz",
+		"User connects to the homelab over ssh as root",
+		"User always runs migrations on Fridays",
+		"Never deploy on Friday",
+		"User's company policy forbids weekend deploys",
+		"User prefers dark mode",
+		"The rule is to keep deploy output concise.",
+	} {
+		t.Run(content, func(t *testing.T) {
+			t.Parallel()
+			if AutoPromote(Fact{Type: "episodic", Content: content, Confidence: 0.99}) {
+				t.Fatalf("AutoPromote(%q) = true, want held for review", content)
+			}
+		})
+	}
+}
+
 func TestBoundedWindow(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -193,7 +240,12 @@ type fakeStore struct {
 		content string
 		ok      bool
 	}
-	nextID int
+	nextID            int
+	pendingCorrection bool
+}
+
+func (s *fakeStore) HasPendingCorrection(context.Context, string) (bool, error) {
+	return s.pendingCorrection, nil
 }
 
 func (s *fakeStore) Insert(_ context.Context, m store.Memory) (string, error) {
@@ -544,7 +596,7 @@ func TestExtractDenyFencesInjectedMemoryEchoBeforeConfirm(t *testing.T) {
 	st := &fakeStore{}
 	st.nearest.id, st.nearest.sim, st.nearest.status, st.nearest.ok = "existing", 0.99, store.StatusActive, true
 	st.nearest.content = fact
-	ids, err := New(gw, st, testLog()).Extract(t.Context(), Request{Text: "assistant: " + fact, Deny: []string{fact}})
+	ids, err := New(gw, st, testLog()).Extract(t.Context(), Request{Text: "assistant: " + fact, Recalled: []string{fact}})
 	if err != nil {
 		t.Fatalf("Extract: %v", err)
 	}
@@ -686,5 +738,87 @@ func TestExtractUtilityGateDropsExplicitFalseOnly(t *testing.T) {
 		if strings.Contains(m.Content, "DynamoDB") {
 			t.Fatalf("utility-gated fact inserted: %q", m.Content)
 		}
+	}
+}
+
+func TestIsCorrection(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		next, prev string
+		want       bool
+	}{
+		{"User lives in Porto.", "User lives in Porto.", false},
+		{"User  lives in   Porto", "User lives in Porto.", false},
+		{"User met with Bob on Tuesday.", "User met Bob on Tuesday.", false},
+		{"The user's dog is Rex.", "User dog is Rex.", false},
+		{"User does not like tea.", "User likes tea.", true},
+		{"User is no longer vegetarian.", "User is vegetarian.", true},
+		{"User lives in Porto, not Lisbon.", "User lives in Lisbon.", true},
+		{"User lives in Berlin.", "User lives in Amsterdam.", true},
+		{"User has 3 cats.", "User has 2 cats.", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.next, func(t *testing.T) {
+			t.Parallel()
+			if got := IsCorrection(tc.next, tc.prev); got != tc.want {
+				t.Fatalf("IsCorrection(%q, %q) = %v, want %v", tc.next, tc.prev, got, tc.want)
+			}
+		})
+	}
+}
+
+// Review point: a correction already waiting on the queue is not stacked
+// again by later turns repeating it.
+func TestExtractSkipsWhenCorrectionAlreadyPending(t *testing.T) {
+	t.Parallel()
+	gw := &fakeGateway{replies: []string{`[{"type":"semantic","content":"User lives in Berlin.","entities":[],"confidence":0.9,"changes_behavior":true}]`}}
+	st := &fakeStore{pendingCorrection: true}
+	st.nearest.id, st.nearest.sim, st.nearest.status, st.nearest.ok = "active-1", 0.96, store.StatusActive, true
+	st.nearest.content = "User lives in Amsterdam."
+	ids, err := New(gw, st, testLog()).Extract(t.Context(), Request{Text: "x"})
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if len(ids) != 0 || len(st.inserted) != 0 || len(st.confirmed) != 0 {
+		t.Fatalf("pending correction stacked: ids=%v inserted=%+v confirmed=%v", ids, st.inserted, st.confirmed)
+	}
+}
+
+// Regression: a reworded restatement of a rejected fact stays dropped,
+// even as a high-confidence episodic fact AutoPromote would activate.
+func TestExtractRewordedRejectedFactStaysDropped(t *testing.T) {
+	t.Parallel()
+	gw := &fakeGateway{replies: []string{`[{"type":"episodic","content":"User met with Bob on Tuesday.","entities":[],"confidence":0.99,"changes_behavior":true}]`}}
+	st := &fakeStore{}
+	st.nearest.id, st.nearest.sim, st.nearest.status, st.nearest.ok = "rejected-1", 0.97, store.StatusRejected, true
+	st.nearest.content = "User met Bob on Tuesday."
+	ids, err := New(gw, st, testLog()).Extract(t.Context(), Request{Text: "x"})
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if len(ids) != 0 || len(st.inserted) != 0 || len(st.promoted) != 0 {
+		t.Fatalf("rejected fact came back: ids=%v inserted=%+v promoted=%v", ids, st.inserted, st.promoted)
+	}
+}
+
+// Review point: a correction of a recalled memory is never fenced as an
+// echo of it; it reaches the queue as a pending supersede.
+func TestExtractRecalledCorrectionIsNotFenced(t *testing.T) {
+	t.Parallel()
+	for _, fact := range []string{"User lives in Porto, not Lisbon.", "User no longer lives in Lisbon."} {
+		t.Run(fact, func(t *testing.T) {
+			t.Parallel()
+			gw := &fakeGateway{replies: []string{fmt.Sprintf(`[{"type":"semantic","content":%q,"entities":[],"confidence":0.9,"changes_behavior":true}]`, fact)}}
+			st := &fakeStore{}
+			st.nearest.id, st.nearest.sim, st.nearest.status, st.nearest.ok = "active-1", 0.96, store.StatusActive, true
+			st.nearest.content = "User lives in Lisbon."
+			ids, err := New(gw, st, testLog()).Extract(t.Context(), Request{Text: "x", Recalled: []string{"User lives in Lisbon."}})
+			if err != nil {
+				t.Fatalf("Extract: %v", err)
+			}
+			if len(ids) != 1 || len(st.inserted) != 1 || st.inserted[0].Supersedes != "active-1" {
+				t.Fatalf("correction lost: ids=%v inserted=%+v", ids, st.inserted)
+			}
+		})
 	}
 }

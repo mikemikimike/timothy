@@ -75,8 +75,8 @@ func TestExtractAmsterdamBerlinWithRealEmbeddings(t *testing.T) {
 		t.Fatalf("embedding count = %d, want 2", len(vecs))
 	}
 	similarity := cosineSimilarity(store.Vector(vecs[0]), store.Vector(vecs[1]))
-	if similarity < nearDupSimilarity {
-		t.Fatalf("Amsterdam/Berlin cosine = %.4f from %s, below %.2f", similarity, model, nearDupSimilarity)
+	if similarity < NearDupSimilarity {
+		t.Fatalf("Amsterdam/Berlin cosine = %.4f from %s, below %.2f", similarity, model, NearDupSimilarity)
 	}
 
 	marker := fmt.Sprintf("real-embedding-%d", time.Now().UnixNano())

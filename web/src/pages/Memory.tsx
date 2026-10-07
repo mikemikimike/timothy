@@ -213,10 +213,17 @@ function Browser() {
     if (!newFact.trim()) return
     setBusy(true)
     try {
-      await addMemory(newFact.trim(), newType)
+      const result = await addMemory(newFact.trim(), newType)
       setNewFact('')
       notifyMemoryChanged()
       if (status === 'active') loadBrowse()
+      if (result.status === 'pending') {
+        toast.info('Memory added to the review queue')
+      } else if (result.status === 'dropped') {
+        toast.info('Memory was not added because it matches a rejected fact')
+      } else {
+        toast.success('Memory saved')
+      }
     } catch {
       toast.error('Could not save the memory')
     } finally {

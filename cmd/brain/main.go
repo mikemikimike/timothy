@@ -263,7 +263,7 @@ func main() {
 		return flags.Enabled(ctx, settings.KeyKBLocalOCR)
 	}, app.Log)
 
-	agent, broker, outputs, builtins, chatPerms, buildErr := buildAgent(gwc, store, app.DB, workspace, searxngURL, markitdownURL, packs, flags.SkillAllowed, flags.Location, mc.Add, app.Log, toolCalls, sensitiveRoute, fxStore, kbEnrich)
+	agent, broker, outputs, builtins, chatPerms, buildErr := buildAgent(gwc, store, app.DB, workspace, searxngURL, markitdownURL, packs, flags.SkillAllowed, flags.Location, rememberWithTurnTrust(mc), app.Log, toolCalls, sensitiveRoute, fxStore, kbEnrich)
 	if buildErr != nil {
 		fmt.Fprintln(os.Stderr, buildErr)
 		os.Exit(1)
@@ -759,11 +759,10 @@ func main() {
 		if !flags.Enabled(ctx, settings.KeyMemoryExtraction) {
 			return
 		}
-		deny := append([]string(nil), extractDeny(ctx)...)
-		deny = append(deny, injectedMemories...)
+		deny := extractDeny(ctx)
 		ectx, cancel := context.WithTimeout(context.WithoutCancel(ctx), extractBudget)
 		defer cancel()
-		if _, err := mc.Extract(ectx, sessionID, seq, text, route, "chat", deny); err != nil {
+		if _, err := mc.Extract(ectx, sessionID, seq, text, route, "chat", deny, injectedMemories); err != nil {
 			app.Log.Warn("turn memory extraction failed", "session_id", sessionID, "error", err)
 		}
 	})
@@ -780,7 +779,7 @@ func main() {
 			deny := extractDeny(ctx)
 			ectx, cancel := context.WithTimeout(context.WithoutCancel(ctx), extractBudget)
 			defer cancel()
-			if _, err := mc.Extract(ectx, sessionID, seq, text, route, "mission", deny); err != nil {
+			if _, err := mc.Extract(ectx, sessionID, seq, text, route, "mission", deny, nil); err != nil {
 				app.Log.Warn("mission memory extraction failed", "session_id", sessionID, "error", err)
 			}
 		})
@@ -794,7 +793,7 @@ func main() {
 		// never starve the summarize that follows it.
 		ectx, cancel := context.WithTimeout(ctx, preCompactExtractBudget)
 		defer cancel()
-		ids, err := mc.Extract(ectx, sessionID, seq, text, route, "compaction", deny)
+		ids, err := mc.Extract(ectx, sessionID, seq, text, route, "compaction", deny, nil)
 		if err != nil {
 			app.Log.Warn("pre-compaction extraction failed", "session_id", sessionID, "error", err)
 			return nil
@@ -2016,6 +2015,12 @@ func (r turnRouter) Stream(ctx context.Context, req gwclient.StreamRequest) (<-c
 
 func (r turnRouter) RouteForRole(ctx context.Context, role string) (string, bool, error) {
 	return r.gw.RouteForRole(ctx, role)
+}
+
+func rememberWithTurnTrust(mc *memclient.Client) builtin.RememberFunc {
+	return func(ctx context.Context, content, memoryType string) (string, string, error) {
+		return mc.Add(ctx, content, memoryType, !tools.UntrustedToolOutputSeen(ctx))
+	}
 }
 
 // buildAgent assembles the compiled-in tool registry and its guard

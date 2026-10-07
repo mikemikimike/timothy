@@ -184,6 +184,8 @@ func (e *gatedExec) Execute(context.Context, string, json.RawMessage) (string, e
 }
 func (e *gatedExec) Trusted(string) bool { return true }
 
+func (e *gatedExec) Taints(string) bool { return false }
+
 // askGatedPerms asks for "gated" and allows everything else (the
 // mission_status sentinel).
 type askGatedPerms struct{}

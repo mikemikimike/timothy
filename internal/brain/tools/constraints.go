@@ -125,6 +125,14 @@ func (c *Constrained) Trusted(name string) bool {
 	return ok && tool.Trusted
 }
 
+// Taints reports whether the registered tool's output counts as
+// untrusted for memory writes: every untrusted tool plus trusted ones
+// marked TaintsTurn (D-128). An unknown name taints.
+func (c *Constrained) Taints(name string) bool {
+	tool, ok := c.reg.Get(name)
+	return !ok || !tool.Trusted || tool.TaintsTurn
+}
+
 // outcomeFor labels a tool call's result for the tool_calls_total
 // counter: "ok" on success, "violation" for model-correctable feedback
 // (bad arguments, unknown tool), "error" for everything else — an

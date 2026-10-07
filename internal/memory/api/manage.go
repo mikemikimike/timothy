@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/SumonMSelim/timothy/internal/memory/extract"
 	"github.com/SumonMSelim/timothy/internal/memory/store"
 )
 
@@ -15,7 +16,10 @@ import (
 type Manager interface {
 	ListByStatus(ctx context.Context, status store.Status, types ...store.MemoryType) ([]store.Memory, error)
 	Get(ctx context.Context, id string) (store.Memory, error)
+	Contents(ctx context.Context, ids []string) (map[string]string, error)
 	Insert(ctx context.Context, m store.Memory) (string, error)
+	NearestActive(ctx context.Context, embedding store.Vector) (id string, similarity float64, status store.Status, ok bool, err error)
+	Confirm(ctx context.Context, id string) error
 	Promote(ctx context.Context, id string) error
 	ConfirmSuperseding(ctx context.Context, id string) error
 	CorrectSuperseding(ctx context.Context, id string, m store.Memory) (string, error)
@@ -72,28 +76,36 @@ func (a *API) handleList(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusInternalServerError, "list_failed", err.Error())
 		return
 	}
+	var previousIDs []string
+	for _, m := range memories {
+		if m.Supersedes != "" {
+			previousIDs = append(previousIDs, m.Supersedes)
+		}
+	}
+	previous, err := a.store.Contents(r.Context(), previousIDs)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "list_failed", err.Error())
+		return
+	}
 	out := make([]memoryJSON, len(memories))
 	for i, m := range memories {
 		out[i] = toJSON(m)
-		if m.Supersedes != "" {
-			previous, err := a.store.Get(r.Context(), m.Supersedes)
-			if err != nil {
-				jsonError(w, http.StatusInternalServerError, "list_failed", err.Error())
-				return
-			}
-			out[i].Supersedes = &supersedesJSON{ID: previous.ID, Content: previous.Content}
+		if content, ok := previous[m.Supersedes]; ok {
+			out[i].Supersedes = &supersedesJSON{ID: m.Supersedes, Content: content}
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"memories": out})
 }
 
-// handleAdd stores a user-explicit memory ("Timothy, remember…") —
-// actor=user activates it directly (D-011).
+// handleAdd stores a user-explicit memory. Untrusted or
+// credentials-adjacent content stays pending for review; clean, trusted
+// memories activate (D-011).
 func (a *API) handleAdd(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Content string `json:"content"`
 		Type    string `json:"type,omitempty"`
+		Trusted bool   `json:"trusted,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, http.StatusBadRequest, "bad_request", err.Error())
@@ -111,22 +123,117 @@ func (a *API) handleAdd(w http.ResponseWriter, r *http.Request) {
 	m := store.Memory{
 		Type: store.MemoryType(req.Type), Content: req.Content,
 		Actor: store.ActorUser, Confidence: 1,
+		RequireReview: !req.Trusted || extract.MentionsCredential(req.Content),
 	}
-	// Best-effort embedding: a user memory without a vector still
-	// serves the text and entity legs.
+	// Best-effort embedding: a memory without a vector still serves the
+	// text and entity legs, though similarity checks are unavailable.
 	if vecs, _, err := a.embed.Embed(r.Context(), []string{req.Content}, "memory-remember"); err != nil {
 		a.log.Warn("remember embedding failed; stored without vector", "error", err)
-	} else {
+	} else if len(vecs) > 0 {
 		m.Embedding = store.Vector(vecs[0])
+	} else {
+		a.log.Warn("remember embedding returned no vector")
 	}
 
+	if len(m.Embedding) > 0 {
+		dupID, similarity, status, found, err := a.store.NearestActive(r.Context(), m.Embedding)
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, "dedup_failed", err.Error())
+			return
+		}
+		if found && similarity >= extract.NearDupSimilarity {
+			switch status {
+			case store.StatusRejected:
+				// A clean, trusted restatement overrides the earlier
+				// rejection as a new active row; the rejected row stays.
+				if req.Trusted && !m.RequireReview {
+					break
+				}
+				a.log.Info("memory dropped as near-duplicate of rejected fact",
+					"of", dupID, "similarity", similarity)
+				writeAddResult(w, "", "dropped")
+				return
+			case store.StatusPending:
+				if req.Trusted && !m.RequireReview {
+					if err := a.activate(r.Context(), dupID); err != nil {
+						jsonError(w, http.StatusInternalServerError, "promote_failed", err.Error())
+						return
+					}
+					writeAddResult(w, dupID, string(store.StatusActive))
+					return
+				}
+				a.log.Info("memory duplicate matched pending row; kept for review",
+					"of", dupID, "similarity", similarity)
+				writeAddResult(w, dupID, string(store.StatusPending))
+				return
+			case store.StatusActive:
+				prev, err := a.store.Get(r.Context(), dupID)
+				if err != nil {
+					jsonError(w, http.StatusInternalServerError, "dedup_failed", err.Error())
+					return
+				}
+				// A correction supersedes the fact instead of reinforcing
+				// it, matching extraction.
+				if extract.IsCorrection(req.Content, prev.Content) {
+					m.Supersedes = dupID
+					break
+				}
+				if m.RequireReview {
+					break
+				}
+				if err := a.store.Confirm(r.Context(), dupID); err != nil {
+					a.log.Warn("confirm on duplicate failed; fact still dropped", "of", dupID, "error", err)
+				}
+				a.log.Info("memory duplicate reinforced existing row",
+					"of", dupID, "similarity", similarity)
+				writeAddResult(w, dupID, string(store.StatusActive))
+				return
+			}
+		}
+	}
+
+	// A clean correction inserts pending and then supersedes atomically,
+	// so the old fact never stays active beside its replacement.
+	activateCorrection := m.Supersedes != "" && !m.RequireReview
+	if activateCorrection {
+		m.RequireReview = true
+	}
 	id, err := a.store.Insert(r.Context(), m)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "insert_failed", err.Error())
 		return
 	}
+	if activateCorrection {
+		if err := a.store.ConfirmSuperseding(r.Context(), id); err != nil {
+			jsonError(w, http.StatusInternalServerError, "supersede_failed", err.Error())
+			return
+		}
+		writeAddResult(w, id, string(store.StatusActive))
+		return
+	}
+	status := store.StatusActive
+	if m.RequireReview {
+		status = store.StatusPending
+	}
+	writeAddResult(w, id, string(status))
+}
+
+// activate confirms a pending memory: a correction supersedes the fact
+// it replaces, anything else is promoted.
+func (a *API) activate(ctx context.Context, id string) error {
+	m, err := a.store.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if m.Supersedes != "" {
+		return a.store.ConfirmSuperseding(ctx, id)
+	}
+	return a.store.Promote(ctx, id)
+}
+
+func writeAddResult(w http.ResponseWriter, id, status string) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"id": id})
+	_ = json.NewEncoder(w).Encode(map[string]string{"id": id, "status": status})
 }
 
 // handleResolve answers a queue card: confirm, reject, or
@@ -149,15 +256,7 @@ func (a *API) handleResolve(w http.ResponseWriter, r *http.Request) {
 		if edited := strings.TrimSpace(req.Content); edited != "" {
 			err = a.confirmEdited(r.Context(), id, edited)
 		} else {
-			var memory store.Memory
-			memory, err = a.store.Get(r.Context(), id)
-			if err == nil {
-				if memory.Supersedes != "" {
-					err = a.store.ConfirmSuperseding(r.Context(), id)
-				} else {
-					err = a.store.Promote(r.Context(), id)
-				}
-			}
+			err = a.activate(r.Context(), id)
 		}
 	case "reject":
 		err = a.store.Reject(r.Context(), id)
